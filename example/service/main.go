@@ -19,6 +19,7 @@ func main() {
 
 	router := velaros.NewRouter()
 	service := eurus.NewService("example", natstransport.New(conn), router)
+	router.ConnectInterplexer(service.Interplexer())
 
 	router.PublicBind("/hello", func(ctx *velaros.Context) {
 		ctx.Reply("Hello, world!")

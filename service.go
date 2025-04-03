@@ -90,7 +90,24 @@ func (s *Service) Start() error {
 }
 
 func (s *Service) Stop() error {
+	if s.stopChan != nil {
+		close(s.stopChan)
+		s.stopChan = nil
+	}
+
+	if err := s.Transport.UnbindInboundSocketMessage(s.Name); err != nil {
+		return err
+	}
+
+	if err := s.Transport.UnbindGatewayAnnounce(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (s *Service) Interplexer() *interplexerConnection {
+	return &interplexerConnection{service: s}
 }
 
 func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
