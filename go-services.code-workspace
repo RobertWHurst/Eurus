@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"name": "Zephyr",
+			"path": "../../TelemetryTV/Zephyr"
+		},
+		{
+			"name": "Eurus",
+			"path": "."
+		},
+		{
+			"name": "Navaros",
+			"path": "../Navaros"
+		},
+		{
+			"name": "Velaros",
+			"path": "../Velaros"
+		},
+		{
+			"name": "Go-Shared",
+			"path": "../../TelemetryTV/Go-Shared"
+		}
+	],
+	"settings": {}
+}

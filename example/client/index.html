@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test</title>
+</head>
+<body>
+  <script>
+    const wc = new WebSocket("ws://localhost:8287");
+    wc.onopen = () => {
+      console.log("WebSocket connection opened");
+      wc.send(JSON.stringify({
+        id: "reply-id",
+        path: "/hello",
+        data: "Hello, server!"
+      }));
+    };
+    wc.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      console.log("Received message:", message);
+    };
+  </script>
+</body>
+</html>

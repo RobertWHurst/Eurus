@@ -1,24 +1,32 @@
 package eurus
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
 	"github.com/RobertWHurst/navaros"
+	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
 )
+
+type MessageWithPath struct {
+	Path string `json:"path"`
+}
 
 type Gateway struct {
 	Name           string
 	Transport      Transport
 	gsi            *GatewayServiceIndexer
-	MessageDecoder func([]byte) (*InboundMessage, error)
+	MessageDecoder velaros.MessageDecoder
 }
 
 func NewGateway(name string, transport Transport) *Gateway {
 	return &Gateway{
-		Name:      name,
-		Transport: transport,
+		Name:           name,
+		Transport:      transport,
+		MessageDecoder: velaros.DefaultMessageDecoder,
 	}
 }
 
@@ -59,6 +67,11 @@ func (g *Gateway) Start() error {
 	if err != nil {
 		return err
 	}
+
+	return g.Transport.AnnounceGateway(&GatewayDescriptor{
+		Name:               g.Name,
+		ServiceDescriptors: g.gsi.ServiceDescriptors,
+	})
 }
 
 func (g *Gateway) Stop() {
@@ -105,12 +118,55 @@ func (g *Gateway) handleWebsocketConnection(res http.ResponseWriter, req *http.R
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	socket := newSocket(conn, g.Transport, g.MessageDecoder)
-	defer socket.close()
+	socketID := uuid.NewString()
+
+	if err := g.Transport.BindOutboundSocketMessage(socketID, func(messageData []byte) error {
+		return conn.Write(context.TODO(), websocket.MessageText, messageData)
+	}); err != nil {
+		conn.Close(websocket.StatusInternalError, "failed to bind outbound socket message")
+		panic(err)
+	}
+
+	if err := g.Transport.BindSocketClose(socketID, func(reason int) error {
+		return conn.Close(websocket.StatusCode(reason), "")
+	}); err != nil {
+		conn.Close(websocket.StatusInternalError, "failed to bind socket close")
+		panic(err)
+	}
 
 	for {
-		if !socket.handleNextMessageWithNode(g.firstHandlerNode) {
+		messageKind, messageData, err := conn.Read(context.TODO())
+		if err != nil {
+			reason := websocket.CloseStatus(err)
+			if reason == -1 {
+				// fixme: handle read error
+				reason = websocket.StatusInternalError
+			}
+
+			g.Transport.SocketClose(socketID, int(reason))
 			break
+		}
+
+		if messageKind != websocket.MessageText {
+			// fixme: Handle invalid message type
+			continue
+		}
+
+		message, err := g.MessageDecoder(messageData)
+		if err != nil {
+			// fixme: Handle 400 - missing path
+			continue
+		}
+
+		serviceName, ok := g.gsi.ResolveService(message.Path)
+		if !ok {
+			// fixme: Handle 404
+			continue
+		}
+
+		if err := g.Transport.InboundSocketMessage(serviceName, socketID, messageData); err != nil {
+			// fixme: Handle error
+			fmt.Println("Error handling inbound socket message:", err)
 		}
 	}
 }
