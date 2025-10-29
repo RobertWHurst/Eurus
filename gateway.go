@@ -243,7 +243,11 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 			g.closeSocket(socket.ID())
 		}
 
-		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), ctx.Headers(), ctx.MessageType(), ctx.Data())
+		connInfo := &velaros.ConnectionInfo{
+			Headers:    ctx.Headers(),
+			RemoteAddr: ctx.RemoteAddr(),
+		}
+		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), connInfo, ctx.MessageType(), ctx.Data())
 		if err == nil {
 			break
 		}

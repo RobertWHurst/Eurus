@@ -2,7 +2,6 @@ package eurus_test
 
 import (
 	"context"
-	"net/http"
 	"testing"
 	"time"
 
@@ -165,7 +164,7 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 	service.Stop()
 
 	// Try to send a message (should not panic)
-	err = transport.MessageService(service.ID, gateway.ID, "socket-1", http.Header{}, websocket.MessageText, []byte("test"))
+	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, websocket.MessageText, []byte("test"))
 	assert.NoError(t, err, "Message to stopped service should not error in transport layer")
 
 	// Message should not be received
@@ -454,7 +453,7 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", http.Header{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
 
 	// Simulate connection handling
 	conn.HandleRawMessage(websocket.MessageText, []byte("test"))
@@ -486,7 +485,7 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", http.Header{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
 
 	// Stop gateway
 	gateway.Stop()
@@ -516,7 +515,7 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	connectionClosed := false
 
 	// Create a connection with cleanup callback that tracks cleanup
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", http.Header{}, func() {
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {
 		cleanupCalled = true
 		connectionClosed = true
 	})

@@ -17,6 +17,7 @@ type Connection struct {
 	gatewayID   string
 	socketID    string
 	headers     http.Header
+	remoteAttr  string
 	messageChan chan *ConnectionMessage
 
 	closeStatus velaros.Status
@@ -29,14 +30,15 @@ type Connection struct {
 
 var _ velaros.SocketConnection = &Connection{}
 
-func NewConnection(transport Transport, gatewayID, socketID string, headers http.Header, onClosed func()) *Connection {
+func NewConnection(transport Transport, gatewayID, socketID string, info *velaros.ConnectionInfo, onClosed func()) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Connection{
 		transport:   transport,
 		gatewayID:   gatewayID,
 		socketID:    socketID,
-		headers:     headers,
+		headers:     info.Headers,
+		remoteAttr:  info.RemoteAddr,
 		messageChan: make(chan *ConnectionMessage, 100),
 
 		onClosed:  onClosed,

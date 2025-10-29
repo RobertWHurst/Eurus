@@ -1,10 +1,10 @@
 package localtransport
 
 import (
-	"net/http"
 	"sync"
 
 	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/telemetrytv/trace"
 )
@@ -19,7 +19,7 @@ type LocalTransport struct {
 	mu                      sync.RWMutex
 	gatewayAnnounceHandlers []func(gatewayDescriptor *eurus.GatewayDescriptor)
 	serviceAnnounceHandlers []func(serviceDescriptor *eurus.ServiceDescriptor)
-	serviceMessageHandlers  map[string]func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte)
+	serviceMessageHandlers  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte)
 	gatewayMessageHandlers  map[string]func(socketID string, msgType websocket.MessageType, msgData []byte)
 	socketClosedHandlers    []func(socketID string, status websocket.StatusCode, reason string)
 }
@@ -29,7 +29,7 @@ var _ eurus.Transport = &LocalTransport{}
 func New() *LocalTransport {
 	transportLocalDebug.Trace("Creating new local transport")
 	return &LocalTransport{
-		serviceMessageHandlers: map[string]func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte){},
+		serviceMessageHandlers: map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte){},
 		gatewayMessageHandlers: map[string]func(socketID string, msgType websocket.MessageType, msgData []byte){},
 	}
 }

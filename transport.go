@@ -1,8 +1,6 @@
 package eurus
 
 import (
-	"net/http"
-
 	"github.com/RobertWHurst/velaros"
 )
 
@@ -15,8 +13,8 @@ type Transport interface {
 	BindServiceAnnounce(handler func(serviceDescriptor *ServiceDescriptor)) error
 	UnbindServiceAnnounce() error
 
-	MessageService(serviceID, gatewayID, socketID string, headers http.Header, msgType velaros.MessageType, msgData []byte) error
-	BindMessageService(serviceID string, handler func(gatewayID, socketID string, headers http.Header, msgType velaros.MessageType, msgData []byte)) error
+	MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType velaros.MessageType, msgData []byte) error
+	BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType velaros.MessageType, msgData []byte)) error
 	UnbindMessageService(serviceID string) error
 
 	MessageGateway(gatewayID string, socketID string, msgType velaros.MessageType, msgData []byte) error

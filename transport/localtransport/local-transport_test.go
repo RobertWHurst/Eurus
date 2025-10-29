@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 )
@@ -14,25 +15,29 @@ func TestLocalTransport_MessageService_DeliversMessageToHandler(t *testing.T) {
 
 	var receivedGatewayID string
 	var receivedSocketID string
-	var receivedHeaders http.Header
+	var receivedConnInfo *velaros.ConnectionInfo
 	var receivedMsgType websocket.MessageType
 	var receivedMsgData []byte
 
-	transport.BindMessageService("service-1", func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte) {
+	transport.BindMessageService("service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte) {
 		receivedGatewayID = gatewayID
 		receivedSocketID = socketID
-		receivedHeaders = headers
+		receivedConnInfo = connInfo
 		receivedMsgType = msgType
 		receivedMsgData = msgData
 	})
 
 	headers := http.Header{"X-Test": []string{"value"}}
-	err := transport.MessageService("service-1", "gateway-1", "socket-1", headers, websocket.MessageText, []byte("test message"))
+	connInfo := &velaros.ConnectionInfo{
+		Headers:    headers,
+		RemoteAddr: "",
+	}
+	err := transport.MessageService("service-1", "gateway-1", "socket-1", connInfo, websocket.MessageText, []byte("test message"))
 
 	assert.NoError(t, err)
 	assert.Equal(t, "gateway-1", receivedGatewayID)
 	assert.Equal(t, "socket-1", receivedSocketID)
-	assert.Equal(t, headers, receivedHeaders)
+	assert.Equal(t, headers, receivedConnInfo.Headers)
 	assert.Equal(t, websocket.MessageText, receivedMsgType)
 	assert.Equal(t, []byte("test message"), receivedMsgData)
 }
@@ -40,7 +45,7 @@ func TestLocalTransport_MessageService_DeliversMessageToHandler(t *testing.T) {
 func TestLocalTransport_MessageService_HandlesNoHandler(t *testing.T) {
 	transport := New()
 
-	err := transport.MessageService("service-1", "gateway-1", "socket-1", http.Header{}, websocket.MessageText, []byte("test"))
+	err := transport.MessageService("service-1", "gateway-1", "socket-1", &velaros.ConnectionInfo{}, websocket.MessageText, []byte("test"))
 
 	assert.NoError(t, err)
 }
@@ -48,7 +53,8 @@ func TestLocalTransport_MessageService_HandlesNoHandler(t *testing.T) {
 func TestLocalTransport_BindMessageService_RegistersHandler(t *testing.T) {
 	transport := New()
 
-	handler := func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte) {}
+	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte) {
+	}
 	err := transport.BindMessageService("service-1", handler)
 
 	assert.NoError(t, err)
@@ -58,7 +64,8 @@ func TestLocalTransport_BindMessageService_RegistersHandler(t *testing.T) {
 func TestLocalTransport_UnbindMessageService_RemovesHandler(t *testing.T) {
 	transport := New()
 
-	handler := func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte) {}
+	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte) {
+	}
 	transport.BindMessageService("service-1", handler)
 
 	err := transport.UnbindMessageService("service-1")

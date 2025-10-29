@@ -2,7 +2,6 @@ package eurus
 
 import (
 	"fmt"
-	"net/http"
 	"sync"
 
 	"github.com/RobertWHurst/velaros"
@@ -109,9 +108,9 @@ func (s *Service) Start() error {
 	}
 
 	serviceDebug.Trace("Binding service message handler")
-	err = s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, headers http.Header, msgType velaros.MessageType, msgData []byte) {
+	err = s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType velaros.MessageType, msgData []byte) {
 		serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
-		connection := s.ensureConnection(gatewayID, socketID, headers)
+		connection := s.ensureConnection(gatewayID, socketID, connInfo)
 		connection.HandleRawMessage(msgType, msgData)
 	})
 	if err != nil {
@@ -247,7 +246,7 @@ func (s *Service) doAnnounce() error {
 	})
 }
 
-func (s *Service) ensureConnection(gatewayID, socketID string, headers http.Header) *Connection {
+func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.ConnectionInfo) *Connection {
 	s.connectionsMu.Lock()
 	defer s.connectionsMu.Unlock()
 
@@ -255,11 +254,11 @@ func (s *Service) ensureConnection(gatewayID, socketID string, headers http.Head
 		return connection
 	}
 
-	connection := NewConnection(s.Transport, gatewayID, socketID, headers, func() {
+	connection := NewConnection(s.Transport, gatewayID, socketID, info, func() {
 		delete(s.connections, socketID)
 	})
 
-	go s.Router.HandleConnection(headers, connection)
+	go s.Router.HandleConnection(info, connection)
 	s.connections[socketID] = connection
 
 	return connection

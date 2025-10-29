@@ -3,6 +3,7 @@ package natstransport
 import (
 	"net/http"
 
+	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/vmihailenco/msgpack/v5"
@@ -12,24 +13,21 @@ type ServiceMessageHeader struct {
 	GatewayID   string                `msgpack:"gatewayID"`
 	SocketID    string                `msgpack:"socketID"`
 	Headers     map[string][]string   `msgpack:"headers"`
+	RemoteAddr  string                `msgpack:"remoteAddr"`
 	MessageType websocket.MessageType `msgpack:"messageType"`
 }
 
 // MessageService sends a message from gateway to service
-func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte) error {
+func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte) error {
 	transportNatsMessageDebug.Tracef("Sending message to service %s from gateway %s socket %s", serviceID, gatewayID, socketID)
 
 	subject := namespace("service", serviceID, "message")
 
-	headerMap := make(map[string][]string)
-	for key, values := range headers {
-		headerMap[key] = values
-	}
-
 	header := &ServiceMessageHeader{
 		GatewayID:   gatewayID,
 		SocketID:    socketID,
-		Headers:     headerMap,
+		Headers:     map[string][]string(connInfo.Headers),
+		RemoteAddr:  connInfo.RemoteAddr,
 		MessageType: msgType,
 	}
 
@@ -123,7 +121,7 @@ func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, he
 }
 
 // BindMessageService binds handler for messages coming to a service
-func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte)) error {
+func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte)) error {
 	transportNatsMessageDebug.Tracef("Binding message handler for service %s", serviceID)
 
 	subject := namespace("service", serviceID, "message")
@@ -148,7 +146,7 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	return nil
 }
 
-func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gatewayID, socketID string, headers http.Header, msgType websocket.MessageType, msgData []byte)) error {
+func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte)) error {
 	header := &ServiceMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
@@ -217,12 +215,11 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 		}
 	}
 
-	headers := make(http.Header)
-	for k, v := range header.Headers {
-		headers[k] = v
+	connInfo := &velaros.ConnectionInfo{
+		Headers:    http.Header(header.Headers),
+		RemoteAddr: header.RemoteAddr,
 	}
-
-	handler(header.GatewayID, header.SocketID, headers, header.MessageType, assembled)
+	handler(header.GatewayID, header.SocketID, connInfo, header.MessageType, assembled)
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
 	return nil
