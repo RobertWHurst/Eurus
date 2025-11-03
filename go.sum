@@ -1,11 +1,7 @@
-github.com/RobertWHurst/navaros v1.13.2 h1:wkGT8HLqQd6Pa+MDhlZdVH5lxV7iBAqXays47rnXuvk=
-github.com/RobertWHurst/navaros v1.13.2/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
-github.com/RobertWHurst/navaros v1.14.0 h1:TI8dYWQ6l5fQ4GAV69JSBWzL5T9VA9GfYVTI7DnxVYA=
-github.com/RobertWHurst/navaros v1.14.0/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
-github.com/RobertWHurst/velaros v1.14.1 h1:O/z62ClNTnKmMKTLxnSlmbsNVRWhVZm9wfK676H5GhI=
-github.com/RobertWHurst/velaros v1.14.1/go.mod h1:xIzsmlC55ZH1Vy5dWD+Gf3tl8VW3bpFYNTQARvTCbYA=
-github.com/RobertWHurst/velaros v1.15.0 h1:fFqw9NAXldoAwHI7iu8cuViIUYLcZ9Qyjm7dazqYHwo=
-github.com/RobertWHurst/velaros v1.15.0/go.mod h1:xIzsmlC55ZH1Vy5dWD+Gf3tl8VW3bpFYNTQARvTCbYA=
+github.com/RobertWHurst/navaros v1.14.1 h1:w579pI207Q3XGGaIK0qbeuvoeIMpbrkgSXpLVn0OEtE=
+github.com/RobertWHurst/navaros v1.14.1/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
+github.com/RobertWHurst/velaros v1.15.2 h1:dn5f2cKzJR4z+NVhcfJi3PYb9yo4Xn4nk3XA97dzCR0=
+github.com/RobertWHurst/velaros v1.15.2/go.mod h1:Hkh1k1xnoRsZ8AKRv6XbD1mTYZ7QecZFvcMDwDuBfwc=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
