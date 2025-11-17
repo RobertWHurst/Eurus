@@ -45,6 +45,14 @@ type Service struct {
 	// facilitates communication between services, gateways, and clients.
 	Transport Transport
 
+	// SerializableKeys is a whitelist of message-level associated value keys
+	// that should be serialized and passed through the transport layer.
+	SerializableKeys []string
+
+	// SerializableSocketKeys is a whitelist of socket-level associated value keys
+	// that should be serialized and passed through the transport layer.
+	SerializableSocketKeys []string
+
 	// RouteDescriptors is a list of route descriptors that describe the routes
 	// that this service can handle. If this is left empty, the service will
 	// not be routable. This is automatically populated if the handler is a

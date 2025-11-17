@@ -15,10 +15,12 @@ var (
 )
 
 type Gateway struct {
-	Name      string
-	ID        string
-	Transport Transport
-	gsi       *GatewayServiceIndexer
+	Name                   string
+	ID                     string
+	Transport              Transport
+	SerializableKeys       []string
+	SerializableSocketKeys []string
+	gsi                    *GatewayServiceIndexer
 
 	socketsMu sync.Mutex
 	sockets   map[string]*velaros.Socket
@@ -250,8 +252,8 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), connInfo, &velaros.SocketMessage{
 			Type:                    ctx.MessageType(),
 			Data:                    ctx.Data(),
-			MessageAssociatedValues: velaros.CtxAssociatedValues(ctx),
-			SocketAssociatedValues:  velaros.CtxSocketAssociatedValues(ctx),
+			MessageAssociatedValues: g.filterAssociatedValues(velaros.CtxAssociatedValues(ctx), g.SerializableKeys),
+			SocketAssociatedValues:  g.filterAssociatedValues(velaros.CtxSocketAssociatedValues(ctx), g.SerializableSocketKeys),
 		})
 		if err == nil {
 			break
@@ -282,4 +284,17 @@ func (g *Gateway) closeSocket(socketID string) {
 		gatewayDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
 	}
 	g.gsi.UnmapSocket(socketID)
+}
+
+func (g *Gateway) filterAssociatedValues(values map[string]any, whitelist []string) map[string]any {
+	if len(whitelist) == 0 {
+		return nil
+	}
+	filtered := make(map[string]any, len(whitelist))
+	for _, key := range whitelist {
+		if val, ok := values[key]; ok {
+			filtered[key] = val
+		}
+	}
+	return filtered
 }
