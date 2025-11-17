@@ -13,12 +13,14 @@ type ConnectionMessage struct {
 }
 
 type Connection struct {
-	transport   Transport
-	gatewayID   string
-	socketID    string
-	headers     http.Header
-	remoteAttr  string
-	messageChan chan *velaros.SocketMessage
+	transport              Transport
+	gatewayID              string
+	socketID               string
+	headers                http.Header
+	remoteAttr             string
+	messageChan            chan *velaros.SocketMessage
+	serializableKeys       []string
+	serializableSocketKeys []string
 
 	closeStatus velaros.Status
 	closeReason string
@@ -30,16 +32,18 @@ type Connection struct {
 
 var _ velaros.SocketConnection = &Connection{}
 
-func NewConnection(transport Transport, gatewayID, socketID string, info *velaros.ConnectionInfo, onClosed func()) *Connection {
+func NewConnection(transport Transport, gatewayID, socketID string, info *velaros.ConnectionInfo, onClosed func(), serializableKeys, serializableSocketKeys []string) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Connection{
-		transport:   transport,
-		gatewayID:   gatewayID,
-		socketID:    socketID,
-		headers:     info.Headers,
-		remoteAttr:  info.RemoteAddr,
-		messageChan: make(chan *velaros.SocketMessage, 100),
+		transport:              transport,
+		gatewayID:              gatewayID,
+		socketID:               socketID,
+		headers:                info.Headers,
+		remoteAttr:             info.RemoteAddr,
+		messageChan:            make(chan *velaros.SocketMessage, 100),
+		serializableKeys:       serializableKeys,
+		serializableSocketKeys: serializableSocketKeys,
 
 		onClosed:  onClosed,
 		ctxCancel: cancel,
@@ -73,11 +77,31 @@ func (c *Connection) Read(socketCtx context.Context) (*velaros.SocketMessage, er
 }
 
 func (c *Connection) Write(ctx context.Context, msg *velaros.SocketMessage) error {
-	err := c.transport.MessageGateway(c.gatewayID, c.socketID, msg)
+	filteredMsg := &velaros.SocketMessage{
+		Type:                    msg.Type,
+		Data:                    msg.Data,
+		MessageAssociatedValues: c.filterAssociatedValues(msg.MessageAssociatedValues, c.serializableKeys),
+		SocketAssociatedValues:  c.filterAssociatedValues(msg.SocketAssociatedValues, c.serializableSocketKeys),
+	}
+
+	err := c.transport.MessageGateway(c.gatewayID, c.socketID, filteredMsg)
 	if err != nil {
 		c.HandleClose(velaros.StatusInternalError, "Failed to write message to gateway")
 	}
 	return err
+}
+
+func (c *Connection) filterAssociatedValues(values map[string]any, whitelist []string) map[string]any {
+	if len(whitelist) == 0 {
+		return nil
+	}
+	filtered := make(map[string]any, len(whitelist))
+	for _, key := range whitelist {
+		if val, ok := values[key]; ok {
+			filtered[key] = val
+		}
+	}
+	return filtered
 }
 
 func (c *Connection) Close(status velaros.Status, reason string) error {

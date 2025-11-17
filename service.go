@@ -264,7 +264,7 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 
 	connection := NewConnection(s.Transport, gatewayID, socketID, info, func() {
 		delete(s.connections, socketID)
-	})
+	}, s.SerializableKeys, s.SerializableSocketKeys)
 
 	go s.Router.HandleConnection(info, connection)
 	s.connections[socketID] = connection

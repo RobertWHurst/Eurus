@@ -459,7 +459,7 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {}, nil, nil)
 
 	// Stop service (should not panic)
 	service.Stop()
@@ -491,7 +491,7 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {}, nil, nil)
 
 	// Stop gateway
 	gateway.Stop()
@@ -527,7 +527,7 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {
 		cleanupCalled = true
 		connectionClosed = true
-	})
+	}, nil, nil)
 
 	// Verify connection starts in open state
 	assert.False(t, cleanupCalled, "Cleanup should not be called initially")
