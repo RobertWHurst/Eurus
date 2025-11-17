@@ -2,11 +2,10 @@ package localtransport
 
 import (
 	"github.com/RobertWHurst/velaros"
-	"github.com/coder/websocket"
 )
 
 // MessageService sends a message from gateway to service
-func (t *LocalTransport) MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte) error {
+func (t *LocalTransport) MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) error {
 	transportLocalMessageDebug.Tracef("Sending message to service %s from gateway %s socket %s", serviceID, gatewayID, socketID)
 
 	t.mu.RLock()
@@ -15,7 +14,7 @@ func (t *LocalTransport) MessageService(serviceID, gatewayID, socketID string, c
 
 	if ok {
 		transportLocalMessageDebug.Tracef("Found handler for service %s, calling handler", serviceID)
-		handler(gatewayID, socketID, connInfo, msgType, msgData)
+		handler(gatewayID, socketID, connInfo, msg)
 		transportLocalMessageDebug.Tracef("Handler for service %s completed", serviceID)
 	} else {
 		transportLocalMessageDebug.Tracef("No handler found for service %s", serviceID)
@@ -25,7 +24,7 @@ func (t *LocalTransport) MessageService(serviceID, gatewayID, socketID string, c
 }
 
 // BindMessageService binds handler for messages coming to a service
-func (t *LocalTransport) BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte)) error {
+func (t *LocalTransport) BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error {
 	transportLocalMessageDebug.Tracef("Binding message handler for service %s", serviceID)
 	t.mu.Lock()
 	t.serviceMessageHandlers[serviceID] = handler

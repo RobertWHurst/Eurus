@@ -1,25 +1,30 @@
 package natstransport
 
 import (
+	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 type GatewayMessageHeader struct {
-	SocketID    string                `msgpack:"socketID"`
-	MessageType websocket.MessageType `msgpack:"messageType"`
+	SocketID                string                `msgpack:"socketID"`
+	MessageType             websocket.MessageType `msgpack:"messageType"`
+	SocketAssociatedValues  map[string]any        `msgpack:"socketAssociatedValues"`
+	MessageAssociatedValues map[string]any        `msgpack:"messageAssociatedValues"`
 }
 
 // MessageGateway sends a message from service to gateway
-func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msgType websocket.MessageType, msgData []byte) error {
+func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *velaros.SocketMessage) error {
 	transportNatsMessageDebug.Tracef("Sending message to gateway %s for socket %s", gatewayID, socketID)
 
 	subject := namespace("gateway", gatewayID, "message")
 
 	header := &GatewayMessageHeader{
-		SocketID:    socketID,
-		MessageType: msgType,
+		SocketID:                socketID,
+		MessageType:             msg.Type,
+		SocketAssociatedValues:  msg.SocketAssociatedValues,
+		MessageAssociatedValues: msg.MessageAssociatedValues,
 	}
 
 	headerBytes, err := msgpack.Marshal(header)
@@ -44,18 +49,18 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msgTyp
 	chunkSubject := ack.ChunkSubject
 	transportNatsMessageDebug.Tracef("Received chunk subject: %s", chunkSubject)
 
-	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(msgData))
+	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(msg.Data))
 	offset := 0
 	index := 0
-	for offset < len(msgData) {
+	for offset < len(msg.Data) {
 		end := offset + MaxChunkSize
-		if end > len(msgData) {
-			end = len(msgData)
+		if end > len(msg.Data) {
+			end = len(msg.Data)
 		}
 
 		chunk := &MessageChunk{
 			Index: index,
-			Data:  msgData[offset:end],
+			Data:  msg.Data[offset:end],
 			IsEOF: false,
 		}
 
@@ -112,7 +117,7 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msgTyp
 }
 
 // BindMessageGateway binds handler for messages coming to a gateway
-func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socketID string, msgType websocket.MessageType, msgData []byte)) error {
+func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error {
 	transportNatsMessageDebug.Tracef("Binding message handler for gateway %s", gatewayID)
 
 	subject := namespace("gateway", gatewayID, "message")
@@ -137,7 +142,7 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	return nil
 }
 
-func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketID string, msgType websocket.MessageType, msgData []byte)) error {
+func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketID string, msg *velaros.SocketMessage)) error {
 	header := &GatewayMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
@@ -206,7 +211,12 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 		}
 	}
 
-	handler(header.SocketID, header.MessageType, assembled)
+	handler(header.SocketID, &velaros.SocketMessage{
+		Type:                    header.MessageType,
+		Data:                    assembled,
+		SocketAssociatedValues:  header.SocketAssociatedValues,
+		MessageAssociatedValues: header.MessageAssociatedValues,
+	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
 	return nil

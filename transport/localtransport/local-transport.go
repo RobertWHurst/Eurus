@@ -19,8 +19,8 @@ type LocalTransport struct {
 	mu                      sync.RWMutex
 	gatewayAnnounceHandlers []func(gatewayDescriptor *eurus.GatewayDescriptor)
 	serviceAnnounceHandlers []func(serviceDescriptor *eurus.ServiceDescriptor)
-	serviceMessageHandlers  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte)
-	gatewayMessageHandlers  map[string]func(socketID string, msgType websocket.MessageType, msgData []byte)
+	serviceMessageHandlers  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)
+	gatewayMessageHandlers  map[string]func(socketID string, msg *velaros.SocketMessage)
 	socketClosedHandlers    []func(socketID string, status websocket.StatusCode, reason string)
 }
 
@@ -29,7 +29,7 @@ var _ eurus.Transport = &LocalTransport{}
 func New() *LocalTransport {
 	transportLocalDebug.Trace("Creating new local transport")
 	return &LocalTransport{
-		serviceMessageHandlers: map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType websocket.MessageType, msgData []byte){},
-		gatewayMessageHandlers: map[string]func(socketID string, msgType websocket.MessageType, msgData []byte){},
+		serviceMessageHandlers: map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage){},
+		gatewayMessageHandlers: map[string]func(socketID string, msg *velaros.SocketMessage){},
 	}
 }

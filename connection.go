@@ -18,7 +18,7 @@ type Connection struct {
 	socketID    string
 	headers     http.Header
 	remoteAttr  string
-	messageChan chan *ConnectionMessage
+	messageChan chan *velaros.SocketMessage
 
 	closeStatus velaros.Status
 	closeReason string
@@ -39,7 +39,7 @@ func NewConnection(transport Transport, gatewayID, socketID string, info *velaro
 		socketID:    socketID,
 		headers:     info.Headers,
 		remoteAttr:  info.RemoteAddr,
-		messageChan: make(chan *ConnectionMessage, 100),
+		messageChan: make(chan *velaros.SocketMessage, 100),
 
 		onClosed:  onClosed,
 		ctxCancel: cancel,
@@ -47,11 +47,8 @@ func NewConnection(transport Transport, gatewayID, socketID string, info *velaro
 	}
 }
 
-func (c *Connection) HandleRawMessage(messageType velaros.MessageType, data []byte) {
-	c.messageChan <- &ConnectionMessage{
-		MessageType: messageType,
-		Data:        data,
-	}
+func (c *Connection) HandleMessage(msg *velaros.SocketMessage) {
+	c.messageChan <- msg
 }
 
 func (c *Connection) HandleClose(status velaros.Status, reason string) {
@@ -61,22 +58,22 @@ func (c *Connection) HandleClose(status velaros.Status, reason string) {
 	c.closeReason = reason
 }
 
-func (c *Connection) Read(socketCtx context.Context) (velaros.MessageType, []byte, error) {
+func (c *Connection) Read(socketCtx context.Context) (*velaros.SocketMessage, error) {
 	select {
 	// Cancelled by service shutdown or connection close
 	case <-c.ctx.Done():
-		return 0, nil, c.ctx.Err()
+		return nil, c.ctx.Err()
 	// Cancelled by service handler
 	case <-socketCtx.Done():
-		return 0, nil, socketCtx.Err()
+		return nil, socketCtx.Err()
 	// New message received
 	case msg := <-c.messageChan:
-		return msg.MessageType, msg.Data, nil
+		return msg, nil
 	}
 }
 
-func (c *Connection) Write(ctx context.Context, messageType velaros.MessageType, data []byte) error {
-	err := c.transport.MessageGateway(c.gatewayID, c.socketID, messageType, data)
+func (c *Connection) Write(ctx context.Context, msg *velaros.SocketMessage) error {
+	err := c.transport.MessageGateway(c.gatewayID, c.socketID, msg)
 	if err != nil {
 		c.HandleClose(velaros.StatusInternalError, "Failed to write message to gateway")
 	}

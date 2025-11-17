@@ -108,10 +108,10 @@ func (s *Service) Start() error {
 	}
 
 	serviceDebug.Trace("Binding service message handler")
-	err = s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msgType velaros.MessageType, msgData []byte) {
+	err = s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 		serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
 		connection := s.ensureConnection(gatewayID, socketID, connInfo)
-		connection.HandleRawMessage(msgType, msgData)
+		connection.HandleMessage(msg)
 	})
 	if err != nil {
 		serviceDebug.Tracef("Failed to bind service message handler: %v", err)

@@ -164,7 +164,10 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 	service.Stop()
 
 	// Try to send a message (should not panic)
-	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, websocket.MessageText, []byte("test"))
+	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
 	assert.NoError(t, err, "Message to stopped service should not error in transport layer")
 
 	// Message should not be received
@@ -198,7 +201,10 @@ func TestMessageDelivery_GatewayStops(t *testing.T) {
 	gateway.Stop()
 
 	// Try to send a message back to the gateway (should not panic)
-	err = transport.MessageGateway(gateway.ID, "socket-1", websocket.MessageText, []byte("test"))
+	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
 	assert.NoError(t, err, "Message to stopped gateway should not error in transport layer")
 }
 
@@ -455,15 +461,15 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	// Create a connection
 	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
 
-	// Simulate connection handling
-	conn.HandleRawMessage(websocket.MessageText, []byte("test"))
-
 	// Stop service (should not panic)
 	service.Stop()
 
 	// Connection operations should be safe
 	// Writing to a stopped service's gateway should not panic
-	err = conn.Write(nil, websocket.MessageText, []byte("test"))
+	err = conn.Write(nil, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
 	assert.NoError(t, err, "Writing after service stop should not error in transport layer")
 }
 
@@ -491,7 +497,10 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	gateway.Stop()
 
 	// Writing to stopped gateway should not panic
-	err = conn.Write(nil, websocket.MessageText, []byte("test"))
+	err = conn.Write(nil, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
 	assert.NoError(t, err, "Writing to stopped gateway should not error in transport layer")
 
 	// Closing connection should not panic
@@ -528,7 +537,10 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 
 	// Try to write - in LocalTransport this doesn't error (fire-and-forget)
 	// but in NATS transport with per-chunk ACKs, this would fail and trigger cleanup
-	err = conn.Write(context.TODO(), websocket.MessageText, []byte("test"))
+	err = conn.Write(context.TODO(), &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
 
 	// LocalTransport doesn't error on writes to stopped gateway
 	assert.NoError(t, err, "LocalTransport doesn't error on writes to stopped gateway")

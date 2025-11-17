@@ -88,7 +88,7 @@ func (g *Gateway) Start() error {
 		return err
 	}
 
-	if err := g.Transport.BindMessageGateway(g.ID, func(socketID string, msgType velaros.MessageType, msgData []byte) {
+	if err := g.Transport.BindMessageGateway(g.ID, func(socketID string, msg *velaros.SocketMessage) {
 		gatewayRouteDebug.Tracef("Received message for socket %s", socketID)
 
 		g.socketsMu.Lock()
@@ -100,7 +100,7 @@ func (g *Gateway) Start() error {
 		}
 
 		gatewayRouteDebug.Tracef("Routing message to socket %s", socketID)
-		if err := socket.Send(msgType, msgData); err != nil {
+		if err := socket.Send(msg.Type, msg.Data, msg.MessageAssociatedValues); err != nil {
 			gatewayRouteDebug.Tracef("Failed to route message to socket %s: %v", socketID, err)
 			gatewayRouteDebug.Tracef("Closing socket %s due to send failure", socketID)
 			socket.Close(velaros.StatusInternalError, "Failed to send message", velaros.ServerCloseSource)
@@ -247,7 +247,12 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 			Headers:    ctx.Headers(),
 			RemoteAddr: ctx.RemoteAddr(),
 		}
-		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), connInfo, ctx.MessageType(), ctx.Data())
+		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), connInfo, &velaros.SocketMessage{
+			Type:                    ctx.MessageType(),
+			Data:                    ctx.Data(),
+			MessageAssociatedValues: velaros.CtxAssociatedValues(ctx),
+			SocketAssociatedValues:  velaros.CtxSocketAssociatedValues(ctx),
+		})
 		if err == nil {
 			break
 		}
