@@ -79,7 +79,7 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			ctx.SetOnSocket("instance_id", instanceID)
 
 			// Reply with success
-			ctx.Reply(map[string]interface{}{
+			ctx.Reply(map[string]any{
 				"status":      "ok",
 				"instance_id": instanceID,
 			})
@@ -101,7 +101,7 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			storedInstanceID, _ := ctx.GetFromSocket("instance_id")
 
 			// Reply with retrieved value
-			ctx.Reply(map[string]interface{}{
+			ctx.Reply(map[string]any{
 				"value":       value,
 				"instance_id": storedInstanceID,
 			})
@@ -129,10 +129,12 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "test complete")
 
 	// Test 1: Send "set" request
-	setRequest := map[string]interface{}{
-		"id":    "msg-1",
-		"path":  "/api/set",
-		"value": "test123",
+	setRequest := map[string]any{
+		"id":   "msg-1",
+		"path": "/api/set",
+		"data": map[string]any{
+			"value": "test123",
+		},
 	}
 
 	t.Logf("Sending set request: %+v", setRequest)
@@ -141,13 +143,13 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 
 	t.Log("Waiting for set response...")
 	// Read "set" response
-	var setResponse map[string]interface{}
+	var setResponse map[string]any
 	err = wsjson.Read(ctx, conn, &setResponse)
 	require.NoError(t, err)
 	t.Logf("Received set response: %+v", setResponse)
 
 	// Extract data from response
-	setData, ok := setResponse["data"].(map[string]interface{})
+	setData, ok := setResponse["data"].(map[string]any)
 	require.True(t, ok, "Response should have data field")
 
 	// Verify response
@@ -158,7 +160,7 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 	t.Logf("First request handled by instance: %s", firstInstanceID)
 
 	// Test 2: Send "get" request (should go to same instance due to socket pinning)
-	getRequest := map[string]interface{}{
+	getRequest := map[string]any{
 		"id":   "msg-2",
 		"path": "/api/get",
 	}
@@ -167,12 +169,12 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 	require.NoError(t, err)
 
 	// Read "get" response
-	var getResponse map[string]interface{}
+	var getResponse map[string]any
 	err = wsjson.Read(ctx, conn, &getResponse)
 	require.NoError(t, err)
 
 	// Extract data from response
-	getData, ok := getResponse["data"].(map[string]interface{})
+	getData, ok := getResponse["data"].(map[string]any)
 	require.True(t, ok, "Response should have data field")
 
 	// Verify response
@@ -183,7 +185,7 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 
 	// Verify that only ONE service instance handled both requests
 	activeInstanceCount := 0
-	handlerCallCounts.Range(func(key, value interface{}) bool {
+	handlerCallCounts.Range(func(key, value any) bool {
 		count := value.(int)
 		if count > 0 {
 			activeInstanceCount++
