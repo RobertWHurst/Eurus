@@ -8,10 +8,14 @@ import (
 )
 
 type GatewayMessageHeader struct {
-	SocketID                string                `msgpack:"socketID"`
-	MessageType             websocket.MessageType `msgpack:"messageType"`
-	SocketAssociatedValues  map[string]any        `msgpack:"socketAssociatedValues"`
-	MessageAssociatedValues map[string]any        `msgpack:"messageAssociatedValues"`
+	SocketID    string                `msgpack:"socketID"`
+	MessageType websocket.MessageType `msgpack:"messageType"`
+}
+
+type GatewayMessagePayload struct {
+	RawData []byte         `msgpack:"rawData"`
+	Data    []byte         `msgpack:"data"`
+	Meta    map[string]any `msgpack:"meta"`
 }
 
 // MessageGateway sends a message from service to gateway
@@ -21,10 +25,8 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *v
 	subject := namespace("gateway", gatewayID, "message")
 
 	header := &GatewayMessageHeader{
-		SocketID:                socketID,
-		MessageType:             msg.Type,
-		SocketAssociatedValues:  msg.SocketAssociatedValues,
-		MessageAssociatedValues: msg.MessageAssociatedValues,
+		SocketID:    socketID,
+		MessageType: msg.Type,
 	}
 
 	headerBytes, err := msgpack.Marshal(header)
@@ -49,18 +51,29 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *v
 	chunkSubject := ack.ChunkSubject
 	transportNatsMessageDebug.Tracef("Received chunk subject: %s", chunkSubject)
 
-	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(msg.Data))
+	payload := &GatewayMessagePayload{
+		RawData: msg.RawData,
+		Data:    msg.Data,
+		Meta:    msg.Meta,
+	}
+	payloadBytes, err := msgpack.Marshal(payload)
+	if err != nil {
+		transportNatsMessageDebug.Tracef("Failed to marshal payload: %v", err)
+		return err
+	}
+
+	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(payloadBytes))
 	offset := 0
 	index := 0
-	for offset < len(msg.Data) {
+	for offset < len(payloadBytes) {
 		end := offset + MaxChunkSize
-		if end > len(msg.Data) {
-			end = len(msg.Data)
+		if end > len(payloadBytes) {
+			end = len(payloadBytes)
 		}
 
 		chunk := &MessageChunk{
 			Index: index,
-			Data:  msg.Data[offset:end],
+			Data:  payloadBytes[offset:end],
 			IsEOF: false,
 		}
 
@@ -211,11 +224,17 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 		}
 	}
 
+	payload := &GatewayMessagePayload{}
+	if err := msgpack.Unmarshal(assembled, payload); err != nil {
+		transportNatsMessageDebug.Tracef("Failed to unmarshal payload: %v", err)
+		return err
+	}
+
 	handler(header.SocketID, &velaros.SocketMessage{
-		Type:                    header.MessageType,
-		Data:                    assembled,
-		SocketAssociatedValues:  header.SocketAssociatedValues,
-		MessageAssociatedValues: header.MessageAssociatedValues,
+		Type:    header.MessageType,
+		RawData: payload.RawData,
+		Data:    payload.Data,
+		Meta:    payload.Meta,
 	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")

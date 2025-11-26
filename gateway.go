@@ -15,12 +15,10 @@ var (
 )
 
 type Gateway struct {
-	Name                   string
-	ID                     string
-	Transport              Transport
-	SerializableKeys       []string
-	SerializableSocketKeys []string
-	gsi                    *GatewayServiceIndexer
+	Name      string
+	ID        string
+	Transport Transport
+	gsi       *GatewayServiceIndexer
 
 	socketsMu sync.Mutex
 	sockets   map[string]*velaros.Socket
@@ -102,7 +100,7 @@ func (g *Gateway) Start() error {
 		}
 
 		gatewayRouteDebug.Tracef("Routing message to socket %s", socketID)
-		if err := socket.Send(msg.Type, msg.Data, msg.MessageAssociatedValues); err != nil {
+		if err := socket.Send(msg.Type, msg.Data); err != nil {
 			gatewayRouteDebug.Tracef("Failed to route message to socket %s: %v", socketID, err)
 			gatewayRouteDebug.Tracef("Closing socket %s due to send failure", socketID)
 			socket.Close(velaros.StatusInternalError, "Failed to send message", velaros.ServerCloseSource)
@@ -250,10 +248,10 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 			RemoteAddr: ctx.RemoteAddr(),
 		}
 		err = g.Transport.MessageService(serviceID, g.ID, socket.ID(), connInfo, &velaros.SocketMessage{
-			Type:                    ctx.MessageType(),
-			Data:                    ctx.Data(),
-			MessageAssociatedValues: g.filterAssociatedValues(velaros.CtxAssociatedValues(ctx), g.SerializableKeys),
-			SocketAssociatedValues:  g.filterAssociatedValues(velaros.CtxSocketAssociatedValues(ctx), g.SerializableSocketKeys),
+			Type:    ctx.MessageType(),
+			RawData: ctx.RawData(),
+			Data:    ctx.Data(),
+			Meta:    velaros.CtxMeta(ctx),
 		})
 		if err == nil {
 			break
@@ -286,15 +284,3 @@ func (g *Gateway) closeSocket(socketID string) {
 	g.gsi.UnmapSocket(socketID)
 }
 
-func (g *Gateway) filterAssociatedValues(values map[string]any, whitelist []string) map[string]any {
-	if len(whitelist) == 0 {
-		return nil
-	}
-	filtered := make(map[string]any, len(whitelist))
-	for _, key := range whitelist {
-		if val, ok := values[key]; ok {
-			filtered[key] = val
-		}
-	}
-	return filtered
-}

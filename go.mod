@@ -5,7 +5,7 @@ go 1.24.2
 toolchain go1.24.5
 
 require (
-	github.com/RobertWHurst/velaros v1.17.0
+	github.com/RobertWHurst/velaros v1.18.0
 	github.com/coder/websocket v1.8.14
 	github.com/nats-io/nats.go v1.47.0
 	github.com/stretchr/testify v1.11.1

@@ -45,14 +45,6 @@ type Service struct {
 	// facilitates communication between services, gateways, and clients.
 	Transport Transport
 
-	// SerializableKeys is a whitelist of message-level associated value keys
-	// that should be serialized and passed through the transport layer.
-	SerializableKeys []string
-
-	// SerializableSocketKeys is a whitelist of socket-level associated value keys
-	// that should be serialized and passed through the transport layer.
-	SerializableSocketKeys []string
-
 	// RouteDescriptors is a list of route descriptors that describe the routes
 	// that this service can handle. If this is left empty, the service will
 	// not be routable. This is automatically populated if the handler is a
@@ -107,30 +99,31 @@ func (s *Service) Start() error {
 	}
 
 	serviceDebug.Trace("Binding gateway announcement handler")
-	err := s.Transport.BindGatewayAnnounce(func(gatewayDescriptor *GatewayDescriptor) {
+	if err := s.Transport.BindGatewayAnnounce(func(gatewayDescriptor *GatewayDescriptor) {
 		s.handleGatewayAnnounce(gatewayDescriptor)
-	})
-	if err != nil {
+	}); err != nil {
 		serviceDebug.Tracef("Failed to bind gateway announcement handler: %v", err)
 		return err
 	}
 
 	serviceDebug.Trace("Binding service message handler")
-	err = s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+	if err := s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 		serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
 		connection := s.ensureConnection(gatewayID, socketID, connInfo)
 		connection.HandleMessage(msg)
-	})
-	if err != nil {
+	}); err != nil {
 		serviceDebug.Tracef("Failed to bind service message handler: %v", err)
 		return err
 	}
 
 	serviceDebug.Trace("Binding close socket handler")
-	err = s.Transport.BindSocketClosed(func(socketID string, status velaros.Status, reason string) {
+	if err := s.Transport.BindSocketClosed(func(socketID string, status velaros.Status, reason string) {
 		serviceHandleDebug.Tracef("Handling close for socket %s", socketID)
 		s.closeConnection(socketID, status, reason)
-	})
+	}); err != nil {
+		serviceDebug.Tracef("Failed to bind close socket handler: %v", err)
+		return err
+	}
 
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
@@ -264,7 +257,7 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 
 	connection := NewConnection(s.Transport, gatewayID, socketID, info, func() {
 		delete(s.connections, socketID)
-	}, s.SerializableKeys, s.SerializableSocketKeys)
+	})
 
 	go s.Router.HandleConnection(info, connection)
 	s.connections[socketID] = connection
