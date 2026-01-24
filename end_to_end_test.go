@@ -68,9 +68,9 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			var req struct {
 				Value string `json:"value"`
 			}
-			err := ctx.Unmarshal(&req)
+			err := ctx.ReceiveInto(&req)
 			if err != nil {
-				ctx.Reply(map[string]string{"error": "invalid request"})
+				ctx.Send(map[string]string{"error": "invalid request"})
 				return
 			}
 
@@ -79,7 +79,7 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			ctx.SetOnSocket("instance_id", instanceID)
 
 			// Reply with success
-			ctx.Reply(map[string]any{
+			ctx.Send(map[string]any{
 				"status":      "ok",
 				"instance_id": instanceID,
 			})
@@ -94,14 +94,14 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			// Retrieve value from socket storage
 			value, ok := ctx.GetFromSocket("stored_value")
 			if !ok {
-				ctx.Reply(map[string]string{"error": "no value stored"})
+				ctx.Send(map[string]string{"error": "no value stored"})
 				return
 			}
 
 			storedInstanceID, _ := ctx.GetFromSocket("instance_id")
 
 			// Reply with retrieved value
-			ctx.Reply(map[string]any{
+			ctx.Send(map[string]any{
 				"value":       value,
 				"instance_id": storedInstanceID,
 			})
@@ -243,7 +243,7 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 			count, _ := handlerCallCounts.LoadOrStore(instanceID, 0)
 			handlerCallCounts.Store(instanceID, count.(int)+1)
 
-			ctx.Reply(map[string]interface{}{
+			ctx.Send(map[string]any{
 				"instance_id": instanceID,
 			})
 		})
@@ -273,7 +273,7 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 		connections = append(connections, conn)
 
 		// Send ping request
-		pingRequest := map[string]interface{}{
+		pingRequest := map[string]any{
 			"id":   fmt.Sprintf("ping-%d", i),
 			"path": "/api/ping",
 		}
@@ -282,12 +282,12 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 		require.NoError(t, err)
 
 		// Read response
-		var response map[string]interface{}
+		var response map[string]any
 		err = wsjson.Read(ctx, conn, &response)
 		require.NoError(t, err)
 
 		// Extract instance ID
-		data, ok := response["data"].(map[string]interface{})
+		data, ok := response["data"].(map[string]any)
 		require.True(t, ok, "Response should have data field")
 		instanceID := data["instance_id"].(string)
 		instancesSeen[instanceID] = true
@@ -305,7 +305,7 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 	assert.GreaterOrEqual(t, len(instancesSeen), 2, "Multiple connections should be distributed across multiple service instances")
 
 	// Log instance usage
-	handlerCallCounts.Range(func(key, value interface{}) bool {
+	handlerCallCounts.Range(func(key, value any) bool {
 		count := value.(int)
 		if count > 0 {
 			t.Logf("Instance %s handled %d requests", key, count)
