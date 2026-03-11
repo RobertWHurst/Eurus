@@ -51,7 +51,7 @@ func TestLocalTransport_MessageService_HandlesNoHandler(t *testing.T) {
 		Data: []byte("test"),
 	})
 
-	assert.NoError(t, err)
+	assert.Error(t, err)
 }
 
 func TestLocalTransport_BindMessageService_RegistersHandler(t *testing.T) {
@@ -108,7 +108,7 @@ func TestLocalTransport_MessageGateway_HandlesNoHandler(t *testing.T) {
 		Data: []byte("test"),
 	})
 
-	assert.NoError(t, err)
+	assert.Error(t, err)
 }
 
 func TestLocalTransport_BindMessageGateway_RegistersHandler(t *testing.T) {

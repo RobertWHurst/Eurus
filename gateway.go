@@ -241,6 +241,7 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		}
 		if serviceID == "" {
 			g.closeSocket(socket.ID())
+			break
 		}
 
 		connInfo := &velaros.ConnectionInfo{

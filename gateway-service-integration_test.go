@@ -163,12 +163,12 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 	// Stop service before sending message
 	service.Stop()
 
-	// Try to send a message (should not panic)
+	// Try to send a message (should error since handler is unbound)
 	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Message to stopped service should not error in transport layer")
+	assert.Error(t, err, "Message to stopped service should error when no handler is bound")
 
 	// Message should not be received
 	select {
@@ -201,11 +201,12 @@ func TestMessageDelivery_GatewayStops(t *testing.T) {
 	gateway.Stop()
 
 	// Try to send a message back to the gateway (should not panic)
+	// Note: Gateway.Stop() does not unbind the message handler, so this succeeds
 	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Message to stopped gateway should not error in transport layer")
+	assert.NoError(t, err, "Message to stopped gateway should not error (handler still bound)")
 }
 
 // TestMultipleGateways_ServiceSelectiveAnnouncement tests that a service
@@ -465,12 +466,12 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	service.Stop()
 
 	// Connection operations should be safe
-	// Writing to a stopped service's gateway should not panic
+	// conn.Write calls MessageGateway — the gateway is still running so the handler is bound
 	err = conn.Write(nil, &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Writing after service stop should not error in transport layer")
+	assert.NoError(t, err, "Writing to a running gateway should not error")
 }
 
 // TestSocketClose_GatewayStopped tests socket cleanup when gateway stops
@@ -497,11 +498,12 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	gateway.Stop()
 
 	// Writing to stopped gateway should not panic
+	// Note: Gateway.Stop() does not unbind the message handler, so this succeeds
 	err = conn.Write(nil, &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Writing to stopped gateway should not error in transport layer")
+	assert.NoError(t, err, "Writing to stopped gateway should not error (handler still bound)")
 
 	// Closing connection should not panic
 	err = conn.Close(websocket.StatusNormalClosure, "test")
@@ -510,21 +512,16 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 
 // TestConnection_WriteFailure_AutoCleanup tests that when Connection.Write() fails,
 // the connection is automatically closed and cleanup callback is invoked.
-// NOTE: LocalTransport doesn't return errors for writes to stopped gateways (fire-and-forget),
-// so this test primarily documents the expected behavior. The auto-cleanup is properly
-// exercised with NATS transport which returns errors on delivery failures.
+// Gateway.Stop() does not unbind the message handler, so we test with a gateway ID
+// that was never registered to trigger the error path.
 func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	transport := localtransport.New()
-
-	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
-	require.NoError(t, err)
 
 	cleanupCalled := false
 	connectionClosed := false
 
-	// Create a connection with cleanup callback that tracks cleanup
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {
+	// Create a connection targeting a gateway ID that has no handler bound
+	conn := eurus.NewConnection(transport, "nonexistent-gateway", "socket-1", &velaros.ConnectionInfo{}, func() {
 		cleanupCalled = true
 		connectionClosed = true
 	})
@@ -532,32 +529,16 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	// Verify connection starts in open state
 	assert.False(t, cleanupCalled, "Cleanup should not be called initially")
 
-	// Stop gateway to simulate unreachable gateway
-	gateway.Stop()
-
-	// Try to write - in LocalTransport this doesn't error (fire-and-forget)
-	// but in NATS transport with per-chunk ACKs, this would fail and trigger cleanup
-	err = conn.Write(context.TODO(), &velaros.SocketMessage{
+	// Write to a gateway with no handler — LocalTransport now returns an error,
+	// which triggers Connection.HandleClose and the cleanup callback
+	err := conn.Write(context.TODO(), &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
 
-	// LocalTransport doesn't error on writes to stopped gateway
-	assert.NoError(t, err, "LocalTransport doesn't error on writes to stopped gateway")
-
-	// Since LocalTransport doesn't error, cleanup won't be triggered
-	// This documents the limitation of LocalTransport for testing
-	assert.False(t, cleanupCalled, "LocalTransport doesn't trigger cleanup (no errors returned)")
-
-	// Manually trigger HandleClose to demonstrate the cleanup mechanism
-	conn.HandleClose(websocket.StatusInternalError, "Simulated write failure")
-
-	// Now cleanup should have been called
-	assert.True(t, cleanupCalled, "Cleanup should be called after HandleClose")
+	assert.Error(t, err, "Write to nonexistent gateway should error when no handler is bound")
+	assert.True(t, cleanupCalled, "Cleanup should be triggered by write failure")
 	assert.True(t, connectionClosed, "Connection should be marked as closed")
-
-	t.Log("Note: This test documents the auto-cleanup mechanism")
-	t.Log("Real write failures are tested with NATS transport in production")
 }
 
 // TestMultipleServicesWithSameName tests that multiple service instances

@@ -1,6 +1,8 @@
 package localtransport
 
 import (
+	"fmt"
+
 	"github.com/RobertWHurst/velaros"
 )
 
@@ -18,6 +20,7 @@ func (t *LocalTransport) MessageService(serviceID, gatewayID, socketID string, c
 		transportLocalMessageDebug.Tracef("Handler for service %s completed", serviceID)
 	} else {
 		transportLocalMessageDebug.Tracef("No handler found for service %s", serviceID)
+		return fmt.Errorf("no handler found for service %s", serviceID)
 	}
 
 	return nil

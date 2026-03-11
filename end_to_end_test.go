@@ -313,3 +313,164 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 		return true
 	})
 }
+
+// TestEndToEnd_ServiceCrash_ClosesSocket tests that when a pinned service instance
+// stops, the gateway closes the WebSocket connection on the next message.
+// Services hold per-connection state (via SetOnSocket), so the client must reconnect
+// and re-establish state with a new instance.
+func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	router := velaros.NewRouter()
+	router.Use(json.Middleware())
+	router.Use(gateway)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	route, err := eurus.NewRouteDescriptor("/api/*")
+	require.NoError(t, err)
+
+	// Start two service instances
+	var services []*eurus.Service
+	for i := 0; i < 2; i++ {
+		serviceRouter := velaros.NewRouter()
+		serviceRouter.Use(json.Middleware())
+
+		service := eurus.NewService("test-service", transport, serviceRouter)
+		service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+		instanceID := service.ID
+
+		serviceRouter.Bind("/api/ping", func(ctx *velaros.Context) {
+			ctx.Send(map[string]any{"instance_id": instanceID})
+		})
+
+		err = service.Start()
+		require.NoError(t, err)
+		services = append(services, service)
+	}
+	defer services[1].Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Connect and pin to an instance
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	require.NoError(t, err)
+	defer conn.CloseNow()
+
+	// First message pins the socket to an instance
+	err = wsjson.Write(ctx, conn, map[string]any{"id": "1", "path": "/api/ping"})
+	require.NoError(t, err)
+
+	var resp map[string]any
+	err = wsjson.Read(ctx, conn, &resp)
+	require.NoError(t, err)
+
+	data := resp["data"].(map[string]any)
+	pinnedID := data["instance_id"].(string)
+	t.Logf("Pinned to instance: %s", pinnedID[:8])
+
+	// Stop the pinned instance
+	for _, svc := range services {
+		if svc.ID == pinnedID {
+			svc.Stop()
+			break
+		}
+	}
+
+	// Send another message — the gateway should detect the dead service and close the socket
+	err = wsjson.Write(ctx, conn, map[string]any{"id": "2", "path": "/api/ping"})
+	if err != nil {
+		// Write itself may fail if the connection was already closed
+		t.Logf("Write failed (connection already closed): %v", err)
+		return
+	}
+
+	// Try to read — should get a close or error
+	var resp2 map[string]any
+	err = wsjson.Read(ctx, conn, &resp2)
+	assert.Error(t, err, "Read should fail because the gateway closed the connection after the pinned service disappeared")
+	t.Logf("Read after service crash: err=%v", err)
+}
+
+// TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy tests that after a service
+// instance stops, new WebSocket connections are routed to a surviving instance.
+func TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	router := velaros.NewRouter()
+	router.Use(json.Middleware())
+	router.Use(gateway)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	route, err := eurus.NewRouteDescriptor("/api/*")
+	require.NoError(t, err)
+
+	// Start two service instances — we'll stop instanceA and verify instanceB still works
+	serviceRouterA := velaros.NewRouter()
+	serviceRouterA.Use(json.Middleware())
+	instanceA := eurus.NewService("test-service", transport, serviceRouterA)
+	instanceA.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	idA := instanceA.ID
+	serviceRouterA.Bind("/api/ping", func(ctx *velaros.Context) {
+		ctx.Send(map[string]any{"instance_id": idA})
+	})
+	err = instanceA.Start()
+	require.NoError(t, err)
+
+	serviceRouterB := velaros.NewRouter()
+	serviceRouterB.Use(json.Middleware())
+	instanceB := eurus.NewService("test-service", transport, serviceRouterB)
+	instanceB.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	idB := instanceB.ID
+	serviceRouterB.Bind("/api/ping", func(ctx *velaros.Context) {
+		ctx.Send(map[string]any{"instance_id": idB})
+	})
+	err = instanceB.Start()
+	require.NoError(t, err)
+	defer instanceB.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// Stop instance A
+	instanceA.Stop()
+	t.Logf("Stopped instance A: %s", idA[:8])
+
+	// Open a NEW connection — it should be routed to the surviving instance B
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	require.NoError(t, err)
+	defer conn.Close(websocket.StatusNormalClosure, "test complete")
+
+	err = wsjson.Write(ctx, conn, map[string]any{"id": "1", "path": "/api/ping"})
+	require.NoError(t, err)
+
+	var resp map[string]any
+	err = wsjson.Read(ctx, conn, &resp)
+	require.NoError(t, err)
+
+	data := resp["data"].(map[string]any)
+	routedTo := data["instance_id"].(string)
+	t.Logf("New connection routed to: %s", routedTo[:8])
+
+	assert.Equal(t, idB, routedTo, "New connection should be routed to the surviving instance B")
+}
