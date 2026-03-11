@@ -256,7 +256,9 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 	}
 
 	connection := NewConnection(s.Transport, gatewayID, socketID, info, func() {
+		s.connectionsMu.Lock()
 		delete(s.connections, socketID)
+		s.connectionsMu.Unlock()
 	})
 
 	go s.Router.HandleConnection(info, connection)
@@ -267,9 +269,10 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 
 func (s *Service) closeConnection(socketID string, status velaros.Status, reason string) {
 	s.connectionsMu.Lock()
-	defer s.connectionsMu.Unlock()
-
 	connection, ok := s.connections[socketID]
+	delete(s.connections, socketID)
+	s.connectionsMu.Unlock()
+
 	if ok {
 		connection.HandleClose(status, reason)
 	}
@@ -277,9 +280,14 @@ func (s *Service) closeConnection(socketID string, status velaros.Status, reason
 
 func (s *Service) closeAllConnections() {
 	s.connectionsMu.Lock()
-	defer s.connectionsMu.Unlock()
+	connections := make([]*Connection, 0, len(s.connections))
+	for _, c := range s.connections {
+		connections = append(connections, c)
+	}
+	s.connections = make(map[string]*Connection)
+	s.connectionsMu.Unlock()
 
-	for _, connection := range s.connections {
-		connection.HandleClose(velaros.StatusGoingAway, "Service is stopping")
+	for _, c := range connections {
+		c.HandleClose(velaros.StatusGoingAway, "Service is stopping")
 	}
 }
