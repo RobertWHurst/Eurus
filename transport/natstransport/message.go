@@ -3,11 +3,11 @@ package natstransport
 import (
 	"time"
 
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	transportNatsMessageDebug = trace.Bind("eurus:transport:nats:message")
+	transportNatsMessageDebug = debug.Bind("eurus:transport:nats:message")
 )
 
 const MaxChunkSize = 1024 * 16

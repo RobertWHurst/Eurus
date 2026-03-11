@@ -5,13 +5,13 @@ import (
 	"sync"
 
 	"github.com/RobertWHurst/velaros"
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	serviceDebug         = trace.Bind("eurus:service")
-	serviceAnnounceDebug = trace.Bind("eurus:service:announce")
-	serviceHandleDebug   = trace.Bind("eurus:service:handler")
+	serviceDebug         = debug.Bind("eurus:service")
+	serviceAnnounceDebug = debug.Bind("eurus:service:announce")
+	serviceHandleDebug   = debug.Bind("eurus:service:handler")
 )
 
 // Service is a struct that facilitates communication between a go microservice

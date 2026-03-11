@@ -8,6 +8,7 @@ import (
 
 type GatewayServiceIndexer struct {
 	mu               sync.Mutex
+	closed           bool
 	descriptors      []*ServiceDescriptor
 	servicesByName   map[string][]*ServiceDescriptor
 	socketToInstance map[string]map[string]string
@@ -21,9 +22,28 @@ func NewGatewayServiceIndexer() *GatewayServiceIndexer {
 	}
 }
 
+func (r *GatewayServiceIndexer) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	r.descriptors = nil
+	r.servicesByName = nil
+	r.socketToInstance = nil
+}
+
+func (r *GatewayServiceIndexer) IsClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
 func (r *GatewayServiceIndexer) SetServiceDescriptor(descriptor *ServiceDescriptor) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
 
 	instances := r.servicesByName[descriptor.Name]
 	for _, existing := range instances {
@@ -41,6 +61,10 @@ func (r *GatewayServiceIndexer) SetServiceDescriptor(descriptor *ServiceDescript
 func (r *GatewayServiceIndexer) UnsetService(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
 
 	var serviceName string
 	for name, instances := range r.servicesByName {
@@ -80,6 +104,11 @@ func (r *GatewayServiceIndexer) UnsetService(id string) error {
 func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.closed {
+		return "", false
+	}
+
 	for serviceName, instances := range r.servicesByName {
 		for _, instance := range instances {
 			for _, route := range instance.RouteDescriptors {
@@ -95,6 +124,10 @@ func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {
 func (r *GatewayServiceIndexer) MapSocket(serviceName, socketID string) (string, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.closed {
+		return "", false, nil
+	}
 
 	if services, ok := r.socketToInstance[socketID]; ok {
 		if instanceID, ok := services[serviceName]; ok {
@@ -131,6 +164,10 @@ func (r *GatewayServiceIndexer) MapSocket(serviceName, socketID string) (string,
 func (r *GatewayServiceIndexer) UnmapSocket(socketID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.closed {
+		return
+	}
 
 	services, ok := r.socketToInstance[socketID]
 	if !ok {

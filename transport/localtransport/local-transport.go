@@ -6,13 +6,13 @@ import (
 	"github.com/RobertWHurst/eurus"
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	transportLocalDebug         = trace.Bind("eurus:transport:local")
-	transportLocalMessageDebug  = trace.Bind("eurus:transport:local:message")
-	transportLocalAnnounceDebug = trace.Bind("eurus:transport:local:announce")
+	transportLocalDebug         = debug.Bind("eurus:transport:local")
+	transportLocalMessageDebug  = debug.Bind("eurus:transport:local:message")
+	transportLocalAnnounceDebug = debug.Bind("eurus:transport:local:announce")
 )
 
 type LocalTransport struct {

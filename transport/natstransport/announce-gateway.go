@@ -3,12 +3,12 @@ package natstransport
 import (
 	"github.com/RobertWHurst/eurus"
 	"github.com/nats-io/nats.go"
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
-	transportNatsAnnounceDebug = trace.Bind("eurus:transport:nats:announce")
+	transportNatsAnnounceDebug = debug.Bind("eurus:transport:nats:announce")
 )
 
 func (c *NatsTransport) AnnounceGateway(gatewayDescriptor *eurus.GatewayDescriptor) error {

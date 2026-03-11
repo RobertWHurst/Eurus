@@ -1,7 +1,7 @@
-github.com/RobertWHurst/navaros v1.17.0 h1:NQmN0chR9r5M88eKGFouLLGBW2W3afMzGMSmWWTjm9Q=
-github.com/RobertWHurst/navaros v1.17.0/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
-github.com/RobertWHurst/velaros v1.22.0 h1:NFf47rpIsE2UKE3tlk9GCGAjFpoeHUQrWznWDhkBt/g=
-github.com/RobertWHurst/velaros v1.22.0/go.mod h1:7VGf9PXIDJvle9TdbUXIxE30+M859o7/uE91YOH+Pag=
+github.com/RobertWHurst/navaros v1.18.0 h1:4cU6OSyaCBy+/mF+Ft0JpSfze5BAq/CbqBqJXT6RLZo=
+github.com/RobertWHurst/navaros v1.18.0/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
+github.com/RobertWHurst/velaros v1.23.0 h1:0BWaxhjUf6X+hfpljqudT4Lfx7gjccv+Iolhm0EnVNE=
+github.com/RobertWHurst/velaros v1.23.0/go.mod h1:7VGf9PXIDJvle9TdbUXIxE30+M859o7/uE91YOH+Pag=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
@@ -22,8 +22,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/telemetrytv/trace v1.2.0 h1:GYZCMYRefXrBrwac2umDTwcaBwueEyVGy6pi3NBLKgA=
-github.com/telemetrytv/trace v1.2.0/go.mod h1:R3XHYSutcDgFeVWjwYRtt/Q6etc/WjwVBkmpPodY1lI=
+github.com/telemetryos/go-debug v1.5.0 h1:kYEU0RQosPpnpOCgZbmm1iUzEE4/U5R0acCFRPVO7AQ=
+github.com/telemetryos/go-debug v1.5.0/go.mod h1:zB4aIvrGthQU2N1ukXduU0oNC6GspS5PXgON2fwVP6A=
 github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IUPn0Bjt8=
 github.com/vmihailenco/msgpack/v5 v5.4.1/go.mod h1:GaZTsDaehaPpQVyxrf5mtQlH+pc21PIudVV/E3rRQok=
 github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAhO7/IwNM9g=

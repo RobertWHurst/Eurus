@@ -5,13 +5,13 @@ import (
 	"sync"
 
 	"github.com/RobertWHurst/velaros"
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	gatewayDebug        = trace.Bind("eurus:gateway")
-	gatewayRouteDebug   = trace.Bind("eurus:gateway:route")
-	gatewayIndexerDebug = trace.Bind("eurus:gateway:indexer")
+	gatewayDebug        = debug.Bind("eurus:gateway")
+	gatewayRouteDebug   = debug.Bind("eurus:gateway:route")
+	gatewayIndexerDebug = debug.Bind("eurus:gateway:indexer")
 )
 
 type Gateway struct {
@@ -155,15 +155,15 @@ func (g *Gateway) Start() error {
 func (g *Gateway) Stop() {
 	gatewayDebug.Tracef("Stopping gateway %s", g.Name)
 
-	if g.gsi == nil {
+	if g.gsi == nil || g.gsi.IsClosed() {
 		gatewayDebug.Trace("Gateway already stopped")
 		return
 	}
 
 	close(g.stopChan)
 
-	gatewayDebug.Trace("Clearing service indexer")
-	g.gsi = nil
+	gatewayDebug.Trace("Closing service indexer")
+	g.gsi.Close()
 
 	gatewayDebug.Trace("Unbinding service announce handler")
 	if err := g.Transport.UnbindServiceAnnounce(); err != nil {
@@ -283,4 +283,3 @@ func (g *Gateway) closeSocket(socketID string) {
 	}
 	g.gsi.UnmapSocket(socketID)
 }
-

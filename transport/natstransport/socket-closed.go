@@ -3,12 +3,12 @@ package natstransport
 import (
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
-	"github.com/telemetrytv/trace"
+	"github.com/telemetryos/go-debug/debug"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
 var (
-	transportNatsSocketClosedDebug = trace.Bind("eurus:transport:nats:socket-closed")
+	transportNatsSocketClosedDebug = debug.Bind("eurus:transport:nats:socket-closed")
 )
 
 type SocketClosedEnvelope struct {
