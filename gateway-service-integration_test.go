@@ -627,3 +627,111 @@ func TestEmptyGatewayNames_AnnouncesToAll(t *testing.T) {
 	canServe2 := gateway2.CanServePath("/api/test")
 	assert.True(t, canServe2, "Service should announce to gateway-2")
 }
+
+func TestHeartbeat_GatewayRecordsServiceHeartbeat(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate a service heartbeat via the transport
+	err = transport.SendServiceHeartbeat(service.ID, []string{gateway.ID})
+	require.NoError(t, err)
+
+	// The gateway should still have the service indexed
+	canServe := gateway.CanServePath("/api/test")
+	assert.True(t, canServe, "Service should remain indexed after heartbeat")
+}
+
+func TestHeartbeat_ServiceRecordsGatewayHeartbeat(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate a gateway heartbeat via the transport
+	err = transport.SendGatewayHeartbeat(gateway.ID, []string{service.ID})
+	require.NoError(t, err)
+
+	// Create a connection through the gateway to the service
+	connInfo := &velaros.ConnectionInfo{}
+	err = transport.MessageService(service.ID, gateway.ID, "socket-1", connInfo, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
+	assert.NoError(t, err, "Service should still accept messages after receiving gateway heartbeat")
+}
+
+func TestHeartbeat_GatewayAndServiceBindDuringStart(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Both sides should have bound their heartbeat handlers.
+	// Verify by sending heartbeats in both directions — no errors, no panics.
+	err = transport.SendServiceHeartbeat(service.ID, []string{gateway.ID})
+	assert.NoError(t, err)
+
+	err = transport.SendGatewayHeartbeat(gateway.ID, []string{service.ID})
+	assert.NoError(t, err)
+}
+
+func TestHeartbeat_UnbindOnStop(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Stop both — should not panic
+	service.Stop()
+	gateway.Stop()
+
+	// Sending heartbeats after stop should still not panic (handlers unbound, no receivers)
+	assert.NotPanics(t, func() {
+		transport.SendServiceHeartbeat("some-service", []string{"some-gateway"})
+		transport.SendGatewayHeartbeat("some-gateway", []string{"some-service"})
+	})
+}

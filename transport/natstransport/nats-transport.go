@@ -12,6 +12,8 @@ type NatsTransport struct {
 	unbindMessageService  map[string]func() error
 	unbindMessageGateway  map[string]func() error
 	unbindSocketClosed    func() error
+	unbindServiceHeartbeat func() error
+	unbindGatewayHeartbeat func() error
 }
 
 var _ eurus.Transport = &NatsTransport{}

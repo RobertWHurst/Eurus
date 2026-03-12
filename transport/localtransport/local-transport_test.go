@@ -239,3 +239,103 @@ func TestLocalTransport_AnnounceService_NotifiesHandler(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, descriptor, receivedDescriptor)
 }
+
+func TestLocalTransport_SendServiceHeartbeat_NotifiesHandler(t *testing.T) {
+	transport := New()
+
+	var receivedID string
+	transport.BindServiceHeartbeat("gateway-1", func(serviceID string) {
+		receivedID = serviceID
+	})
+
+	err := transport.SendServiceHeartbeat("service-1", []string{"gateway-1"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "service-1", receivedID)
+}
+
+func TestLocalTransport_SendServiceHeartbeat_NoHandlers(t *testing.T) {
+	transport := New()
+
+	err := transport.SendServiceHeartbeat("service-1", []string{"gateway-1"})
+
+	assert.NoError(t, err)
+}
+
+func TestLocalTransport_UnbindServiceHeartbeat_ClearsHandlers(t *testing.T) {
+	transport := New()
+
+	called := false
+	transport.BindServiceHeartbeat("gateway-1", func(serviceID string) {
+		called = true
+	})
+
+	err := transport.UnbindServiceHeartbeat()
+	assert.NoError(t, err)
+
+	transport.SendServiceHeartbeat("service-1", []string{"gateway-1"})
+	assert.False(t, called)
+}
+
+func TestLocalTransport_SendGatewayHeartbeat_NotifiesHandler(t *testing.T) {
+	transport := New()
+
+	var receivedID string
+	transport.BindGatewayHeartbeat("service-1", func(gatewayID string) {
+		receivedID = gatewayID
+	})
+
+	err := transport.SendGatewayHeartbeat("gateway-1", []string{"service-1"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "gateway-1", receivedID)
+}
+
+func TestLocalTransport_SendGatewayHeartbeat_NoHandlers(t *testing.T) {
+	transport := New()
+
+	err := transport.SendGatewayHeartbeat("gateway-1", []string{"service-1"})
+
+	assert.NoError(t, err)
+}
+
+func TestLocalTransport_UnbindGatewayHeartbeat_ClearsHandlers(t *testing.T) {
+	transport := New()
+
+	called := false
+	transport.BindGatewayHeartbeat("service-1", func(gatewayID string) {
+		called = true
+	})
+
+	err := transport.UnbindGatewayHeartbeat()
+	assert.NoError(t, err)
+
+	transport.SendGatewayHeartbeat("gateway-1", []string{"service-1"})
+	assert.False(t, called)
+}
+
+func TestLocalTransport_SendServiceHeartbeat_NotifiesMultipleHandlers(t *testing.T) {
+	transport := New()
+
+	count := 0
+	transport.BindServiceHeartbeat("gw-1", func(serviceID string) { count++ })
+	transport.BindServiceHeartbeat("gw-2", func(serviceID string) { count++ })
+
+	err := transport.SendServiceHeartbeat("service-1", []string{"gw-1"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, 2, count)
+}
+
+func TestLocalTransport_SendGatewayHeartbeat_NotifiesMultipleHandlers(t *testing.T) {
+	transport := New()
+
+	count := 0
+	transport.BindGatewayHeartbeat("svc-1", func(gatewayID string) { count++ })
+	transport.BindGatewayHeartbeat("svc-2", func(gatewayID string) { count++ })
+
+	err := transport.SendGatewayHeartbeat("gateway-1", []string{"svc-1"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, 2, count)
+}

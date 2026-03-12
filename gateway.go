@@ -1,17 +1,20 @@
 package eurus
 
 import (
+	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	gatewayDebug        = debug.Bind("eurus:gateway")
-	gatewayRouteDebug   = debug.Bind("eurus:gateway:route")
-	gatewayIndexerDebug = debug.Bind("eurus:gateway:indexer")
+	gatewayDebug          = debug.Bind("eurus:gateway")
+	gatewayRouteDebug     = debug.Bind("eurus:gateway:route")
+	gatewayIndexerDebug   = debug.Bind("eurus:gateway:indexer")
+	gatewayHeartbeatDebug = debug.Bind("eurus:gateway:heartbeat")
 )
 
 type Gateway struct {
@@ -100,7 +103,10 @@ func (g *Gateway) Start() error {
 		}
 
 		gatewayRouteDebug.Tracef("Routing message to socket %s", socketID)
-		if err := socket.Send(msg.Type, msg.Data); err != nil {
+		sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := socket.SendWithContext(sendCtx, msg.Type, msg.Data)
+		sendCancel()
+		if err != nil {
 			gatewayRouteDebug.Tracef("Failed to route message to socket %s: %v", socketID, err)
 			gatewayRouteDebug.Tracef("Closing socket %s due to send failure", socketID)
 			socket.Close(velaros.StatusInternalError, "Failed to send message", velaros.ServerCloseSource)
@@ -140,6 +146,17 @@ func (g *Gateway) Start() error {
 		return err
 	}
 
+	gatewayDebug.Trace("Binding service heartbeat handler")
+	if err := g.Transport.BindServiceHeartbeat(g.ID, func(serviceID string) {
+		gatewayHeartbeatDebug.Tracef("Received heartbeat from service %s", serviceID)
+		g.gsi.RecordHeartbeat(serviceID)
+	}); err != nil {
+		gatewayDebug.Tracef("Failed to bind service heartbeat handler: %v", err)
+		return err
+	}
+
+	go g.heartbeatLoop()
+
 	gatewayDebug.Tracef("Announcing gateway %s", g.Name)
 
 	if err := g.Transport.AnnounceGateway(&GatewayDescriptor{
@@ -168,6 +185,12 @@ func (g *Gateway) Stop() {
 	gatewayDebug.Trace("Unbinding service announce handler")
 	if err := g.Transport.UnbindServiceAnnounce(); err != nil {
 		gatewayDebug.Tracef("Failed to unbind service announce: %v", err)
+		panic(err)
+	}
+
+	gatewayDebug.Trace("Unbinding service heartbeat handler")
+	if err := g.Transport.UnbindServiceHeartbeat(); err != nil {
+		gatewayDebug.Tracef("Failed to unbind service heartbeat handler: %v", err)
 		panic(err)
 	}
 
@@ -272,6 +295,33 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 func (g *Gateway) HandleClose(ctx *velaros.Context) {
 	gatewayRouteDebug.Tracef("Handling close for socket %s", ctx.SocketID())
 	g.closeSocket(ctx.SocketID())
+}
+
+func (g *Gateway) heartbeatLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopChan:
+			return
+		case <-ticker.C:
+			g.sendAndPruneHeartbeats()
+		}
+	}
+}
+
+func (g *Gateway) sendAndPruneHeartbeats() {
+	serviceIDs := g.gsi.ServiceIDs()
+
+	if len(serviceIDs) > 0 {
+		gatewayHeartbeatDebug.Tracef("Sending heartbeat to %d services", len(serviceIDs))
+		if err := g.Transport.SendGatewayHeartbeat(g.ID, serviceIDs); err != nil {
+			gatewayHeartbeatDebug.Tracef("Failed to send heartbeat: %v", err)
+		}
+	}
+
+	g.gsi.PruneStaleServices(10 * time.Second)
 }
 
 func (g *Gateway) closeSocket(socketID string) {

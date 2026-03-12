@@ -47,6 +47,10 @@ func NewConnection(transport Transport, gatewayID, socketID string, info *velaro
 	}
 }
 
+func (c *Connection) GatewayID() string {
+	return c.gatewayID
+}
+
 func (c *Connection) HandleMessage(msg *velaros.SocketMessage) {
 	c.messageChan <- msg
 }

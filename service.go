@@ -3,15 +3,17 @@ package eurus
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	serviceDebug         = debug.Bind("eurus:service")
-	serviceAnnounceDebug = debug.Bind("eurus:service:announce")
-	serviceHandleDebug   = debug.Bind("eurus:service:handler")
+	serviceDebug          = debug.Bind("eurus:service")
+	serviceAnnounceDebug  = debug.Bind("eurus:service:announce")
+	serviceHandleDebug    = debug.Bind("eurus:service:handler")
+	serviceHeartbeatDebug = debug.Bind("eurus:service:heartbeat")
 )
 
 // Service is a struct that facilitates communication between a go microservice
@@ -58,6 +60,9 @@ type Service struct {
 	connectionsMu sync.Mutex
 	connections   map[string]*Connection
 
+	lastGatewayHeartbeatMu sync.Mutex
+	lastGatewayHeartbeat   map[string]time.Time
+
 	stopChan chan struct{}
 }
 
@@ -74,12 +79,13 @@ func NewService(name string, transport Transport, handler any) *Service {
 	router.Use(handler)
 
 	return &Service{
-		Name:        name,
-		ID:          generateID(),
-		Transport:   transport,
-		Router:      router,
-		connections: map[string]*Connection{},
-		stopChan:    make(chan struct{}),
+		Name:                 name,
+		ID:                   generateID(),
+		Transport:            transport,
+		Router:               router,
+		connections:          map[string]*Connection{},
+		lastGatewayHeartbeat: map[string]time.Time{},
+		stopChan:             make(chan struct{}),
 	}
 }
 
@@ -125,6 +131,19 @@ func (s *Service) Start() error {
 		return err
 	}
 
+	serviceDebug.Trace("Binding gateway heartbeat handler")
+	if err := s.Transport.BindGatewayHeartbeat(s.ID, func(gatewayID string) {
+		serviceHeartbeatDebug.Tracef("Received heartbeat from gateway %s", gatewayID)
+		s.lastGatewayHeartbeatMu.Lock()
+		s.lastGatewayHeartbeat[gatewayID] = time.Now()
+		s.lastGatewayHeartbeatMu.Unlock()
+	}); err != nil {
+		serviceDebug.Tracef("Failed to bind gateway heartbeat handler: %v", err)
+		return err
+	}
+
+	go s.heartbeatLoop()
+
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
 		serviceDebug.Tracef("Failed to announce service: %v", err)
@@ -156,6 +175,12 @@ func (s *Service) Stop() {
 	serviceDebug.Trace("Unbinding dispatch handler")
 	if err := s.Transport.UnbindMessageService(s.ID); err != nil {
 		serviceDebug.Tracef("Failed to unbind dispatch handler: %v", err)
+		panic(err)
+	}
+
+	serviceDebug.Trace("Unbinding gateway heartbeat handler")
+	if err := s.Transport.UnbindGatewayHeartbeat(); err != nil {
+		serviceDebug.Tracef("Failed to unbind gateway heartbeat handler: %v", err)
 		panic(err)
 	}
 
@@ -275,6 +300,74 @@ func (s *Service) closeConnection(socketID string, status velaros.Status, reason
 
 	if ok {
 		connection.HandleClose(status, reason)
+	}
+}
+
+func (s *Service) heartbeatLoop() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.sendAndPruneHeartbeats()
+		}
+	}
+}
+
+func (s *Service) sendAndPruneHeartbeats() {
+	s.connectionsMu.Lock()
+	gatewayIDSet := map[string]struct{}{}
+	for _, conn := range s.connections {
+		gatewayIDSet[conn.GatewayID()] = struct{}{}
+	}
+	s.connectionsMu.Unlock()
+
+	gatewayIDs := make([]string, 0, len(gatewayIDSet))
+	for id := range gatewayIDSet {
+		gatewayIDs = append(gatewayIDs, id)
+	}
+
+	if len(gatewayIDs) > 0 {
+		serviceHeartbeatDebug.Tracef("Sending heartbeat to %d gateways", len(gatewayIDs))
+		if err := s.Transport.SendServiceHeartbeat(s.ID, gatewayIDs); err != nil {
+			serviceHeartbeatDebug.Tracef("Failed to send heartbeat: %v", err)
+		}
+	}
+
+	now := time.Now()
+	s.lastGatewayHeartbeatMu.Lock()
+	var deadGatewayIDs []string
+	for gatewayID, lastSeen := range s.lastGatewayHeartbeat {
+		if now.Sub(lastSeen) > 10*time.Second {
+			serviceHeartbeatDebug.Tracef("Gateway %s heartbeat stale, pruning", gatewayID)
+			deadGatewayIDs = append(deadGatewayIDs, gatewayID)
+			delete(s.lastGatewayHeartbeat, gatewayID)
+		}
+	}
+	s.lastGatewayHeartbeatMu.Unlock()
+
+	for _, gatewayID := range deadGatewayIDs {
+		s.closeConnectionsByGateway(gatewayID)
+	}
+}
+
+func (s *Service) closeConnectionsByGateway(gatewayID string) {
+	s.connectionsMu.Lock()
+	var toClose []*Connection
+	for socketID, conn := range s.connections {
+		if conn.GatewayID() == gatewayID {
+			toClose = append(toClose, conn)
+			delete(s.connections, socketID)
+		}
+	}
+	s.connectionsMu.Unlock()
+
+	for _, conn := range toClose {
+		serviceHeartbeatDebug.Tracef("Closing connection for dead gateway %s", gatewayID)
+		conn.HandleClose(velaros.StatusGoingAway, "Gateway heartbeat timeout")
 	}
 }
 

@@ -136,9 +136,11 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	subject := namespace("gateway", gatewayID, "message")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
-		if err := t.handleGatewayMessage(msg, handler); err != nil {
-			transportNatsMessageDebug.Tracef("Error handling gateway message: %v", err)
-		}
+		go func() {
+			if err := t.handleGatewayMessage(msg, handler); err != nil {
+				transportNatsMessageDebug.Tracef("Error handling gateway message: %v", err)
+			}
+		}()
 	})
 
 	if err != nil {

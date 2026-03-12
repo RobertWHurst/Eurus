@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 )
 
 type GatewayServiceIndexer struct {
@@ -12,6 +13,7 @@ type GatewayServiceIndexer struct {
 	descriptors      []*ServiceDescriptor
 	servicesByName   map[string][]*ServiceDescriptor
 	socketToInstance map[string]map[string]string
+	lastHeartbeat    map[string]time.Time
 }
 
 func NewGatewayServiceIndexer() *GatewayServiceIndexer {
@@ -19,6 +21,7 @@ func NewGatewayServiceIndexer() *GatewayServiceIndexer {
 		descriptors:      []*ServiceDescriptor{},
 		servicesByName:   map[string][]*ServiceDescriptor{},
 		socketToInstance: map[string]map[string]string{},
+		lastHeartbeat:    map[string]time.Time{},
 	}
 }
 
@@ -29,6 +32,7 @@ func (r *GatewayServiceIndexer) Close() {
 	r.descriptors = nil
 	r.servicesByName = nil
 	r.socketToInstance = nil
+	r.lastHeartbeat = nil
 }
 
 func (r *GatewayServiceIndexer) IsClosed() bool {
@@ -99,6 +103,51 @@ func (r *GatewayServiceIndexer) UnsetService(id string) error {
 	}
 
 	return nil
+}
+
+func (r *GatewayServiceIndexer) ServiceIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
+
+	ids := make([]string, 0, len(r.descriptors))
+	for _, d := range r.descriptors {
+		ids = append(ids, d.ID)
+	}
+	return ids
+}
+
+func (r *GatewayServiceIndexer) RecordHeartbeat(serviceID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return
+	}
+
+	r.lastHeartbeat[serviceID] = time.Now()
+}
+
+func (r *GatewayServiceIndexer) PruneStaleServices(timeout time.Duration) {
+	r.mu.Lock()
+
+	var staleIDs []string
+	now := time.Now()
+	for serviceID, lastSeen := range r.lastHeartbeat {
+		if now.Sub(lastSeen) > timeout {
+			staleIDs = append(staleIDs, serviceID)
+			delete(r.lastHeartbeat, serviceID)
+		}
+	}
+
+	r.mu.Unlock()
+
+	for _, id := range staleIDs {
+		r.UnsetService(id)
+	}
 }
 
 func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {

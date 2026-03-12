@@ -144,9 +144,11 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	subject := namespace("service", serviceID, "message")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
-		if err := t.handleServiceMessage(msg, handler); err != nil {
-			transportNatsMessageDebug.Tracef("Error handling service message: %v", err)
-		}
+		go func() {
+			if err := t.handleServiceMessage(msg, handler); err != nil {
+				transportNatsMessageDebug.Tracef("Error handling service message: %v", err)
+			}
+		}()
 	})
 
 	if err != nil {

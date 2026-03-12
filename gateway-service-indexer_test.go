@@ -3,6 +3,7 @@ package eurus
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -335,4 +336,168 @@ func TestGatewayServiceIndexer_UnmapSocket_HandlesNonexistentSocket(t *testing.T
 	indexer.UnmapSocket("nonexistent-socket")
 
 	assert.Len(t, indexer.socketToInstance, 0)
+}
+
+func TestGatewayServiceIndexer_ServiceIDs_ReturnsAllIDs(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "svc-a",
+		ID:               "id-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "svc-b",
+		ID:               "id-2",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	ids := indexer.ServiceIDs()
+	assert.Len(t, ids, 2)
+	assert.Contains(t, ids, "id-1")
+	assert.Contains(t, ids, "id-2")
+}
+
+func TestGatewayServiceIndexer_ServiceIDs_ReturnsNilWhenClosed(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "svc-a",
+		ID:               "id-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	indexer.Close()
+
+	ids := indexer.ServiceIDs()
+	assert.Nil(t, ids)
+}
+
+func TestGatewayServiceIndexer_RecordHeartbeat_RecordsTimestamp(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	before := time.Now()
+	indexer.RecordHeartbeat("service-1")
+
+	assert.Contains(t, indexer.lastHeartbeat, "service-1")
+	assert.False(t, indexer.lastHeartbeat["service-1"].Before(before))
+}
+
+func TestGatewayServiceIndexer_RecordHeartbeat_UpdatesTimestamp(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	indexer.RecordHeartbeat("service-1")
+	first := indexer.lastHeartbeat["service-1"]
+
+	time.Sleep(time.Millisecond)
+	indexer.RecordHeartbeat("service-1")
+	second := indexer.lastHeartbeat["service-1"]
+
+	assert.True(t, second.After(first))
+}
+
+func TestGatewayServiceIndexer_RecordHeartbeat_SafeWhenClosed(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+	indexer.Close()
+
+	assert.NotPanics(t, func() {
+		indexer.RecordHeartbeat("service-1")
+	})
+}
+
+func TestGatewayServiceIndexer_PruneStaleServices_RemovesStaleService(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	indexer.RecordHeartbeat("instance-1")
+	time.Sleep(5 * time.Millisecond)
+
+	indexer.PruneStaleServices(time.Millisecond)
+
+	assert.Len(t, indexer.descriptors, 0)
+	assert.Len(t, indexer.servicesByName, 0)
+	assert.Empty(t, indexer.lastHeartbeat)
+}
+
+func TestGatewayServiceIndexer_PruneStaleServices_KeepsFreshService(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	indexer.RecordHeartbeat("instance-1")
+
+	indexer.PruneStaleServices(time.Hour)
+
+	assert.Len(t, indexer.descriptors, 1)
+	assert.Len(t, indexer.servicesByName["user-service"], 1)
+	assert.Contains(t, indexer.lastHeartbeat, "instance-1")
+}
+
+func TestGatewayServiceIndexer_PruneStaleServices_PrunesOnlyStale(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "stale-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "fresh-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	indexer.RecordHeartbeat("stale-1")
+	time.Sleep(5 * time.Millisecond)
+	indexer.RecordHeartbeat("fresh-1")
+
+	indexer.PruneStaleServices(2 * time.Millisecond)
+
+	assert.Len(t, indexer.descriptors, 1)
+	assert.Equal(t, "fresh-1", indexer.descriptors[0].ID)
+	assert.NotContains(t, indexer.lastHeartbeat, "stale-1")
+	assert.Contains(t, indexer.lastHeartbeat, "fresh-1")
+}
+
+func TestGatewayServiceIndexer_PruneStaleServices_CleansUpSocketMappings(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	indexer.MapSocket("user-service", "socket-1")
+	indexer.RecordHeartbeat("instance-1")
+	time.Sleep(5 * time.Millisecond)
+
+	indexer.PruneStaleServices(time.Millisecond)
+
+	assert.Len(t, indexer.socketToInstance, 0)
+}
+
+func TestGatewayServiceIndexer_PruneStaleServices_SafeWhenClosed(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+	indexer.Close()
+
+	assert.NotPanics(t, func() {
+		indexer.PruneStaleServices(time.Millisecond)
+	})
 }
