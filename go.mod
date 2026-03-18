@@ -12,7 +12,7 @@ require (
 )
 
 require (
-	github.com/RobertWHurst/navaros v1.20.0 // indirect
+	github.com/RobertWHurst/navaros v1.21.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/regexp v0.0.0-20250905093917-f7b3be9d1853 // indirect
