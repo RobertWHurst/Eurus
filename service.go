@@ -318,17 +318,20 @@ func (s *Service) heartbeatLoop() {
 }
 
 func (s *Service) sendAndPruneHeartbeats() {
-	s.connectionsMu.Lock()
-	gatewayIDSet := map[string]struct{}{}
-	for _, conn := range s.connections {
-		gatewayIDSet[conn.GatewayID()] = struct{}{}
+	s.lastGatewayHeartbeatMu.Lock()
+	gatewayIDs := make([]string, 0, len(s.lastGatewayHeartbeat))
+	var deadGatewayIDs []string
+	now := time.Now()
+	for gatewayID, lastSeen := range s.lastGatewayHeartbeat {
+		if now.Sub(lastSeen) > 10*time.Second {
+			serviceHeartbeatDebug.Tracef("Gateway %s heartbeat stale, pruning", gatewayID)
+			deadGatewayIDs = append(deadGatewayIDs, gatewayID)
+			delete(s.lastGatewayHeartbeat, gatewayID)
+		} else {
+			gatewayIDs = append(gatewayIDs, gatewayID)
+		}
 	}
-	s.connectionsMu.Unlock()
-
-	gatewayIDs := make([]string, 0, len(gatewayIDSet))
-	for id := range gatewayIDSet {
-		gatewayIDs = append(gatewayIDs, id)
-	}
+	s.lastGatewayHeartbeatMu.Unlock()
 
 	if len(gatewayIDs) > 0 {
 		serviceHeartbeatDebug.Tracef("Sending heartbeat to %d gateways", len(gatewayIDs))
@@ -336,18 +339,6 @@ func (s *Service) sendAndPruneHeartbeats() {
 			serviceHeartbeatDebug.Tracef("Failed to send heartbeat: %v", err)
 		}
 	}
-
-	now := time.Now()
-	s.lastGatewayHeartbeatMu.Lock()
-	var deadGatewayIDs []string
-	for gatewayID, lastSeen := range s.lastGatewayHeartbeat {
-		if now.Sub(lastSeen) > 10*time.Second {
-			serviceHeartbeatDebug.Tracef("Gateway %s heartbeat stale, pruning", gatewayID)
-			deadGatewayIDs = append(deadGatewayIDs, gatewayID)
-			delete(s.lastGatewayHeartbeat, gatewayID)
-		}
-	}
-	s.lastGatewayHeartbeatMu.Unlock()
 
 	for _, gatewayID := range deadGatewayIDs {
 		s.closeConnectionsByGateway(gatewayID)
