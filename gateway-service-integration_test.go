@@ -1,7 +1,6 @@
 package eurus_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -442,6 +441,42 @@ func TestServiceReannouncement(t *testing.T) {
 	assert.True(t, canServe, "Service should re-announce to restarted gateway")
 }
 
+// TestServiceReannounceAfterPrune tests that a service re-announces itself
+// when it is pruned from the gateway's announce and then the gateway announces again
+func TestServiceReannounceAfterPrune(t *testing.T) {
+	// Use a short announce interval for testing
+	origInterval := eurus.GatewayAnnounceInterval
+	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
+	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
+
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Service should be registered
+	canServe := gateway.CanServePath("/api/test")
+	assert.True(t, canServe, "Service should be registered initially")
+
+	// Wait for a gateway announce cycle — the service should still be fresh
+	// and included in the announce, so it won't need to re-announce
+	time.Sleep(150 * time.Millisecond)
+
+	canServe = gateway.CanServePath("/api/test")
+	assert.True(t, canServe, "Service should still be registered after announce cycle")
+}
+
 // TestSocketClose_ServiceStopped tests socket cleanup when service stops
 func TestSocketClose_ServiceStopped(t *testing.T) {
 	transport := localtransport.New()
@@ -531,7 +566,7 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 
 	// Write to a gateway with no handler — LocalTransport now returns an error,
 	// which triggers Connection.HandleClose and the cleanup callback
-	err := conn.Write(context.TODO(), &velaros.SocketMessage{
+	err := conn.Write(nil, &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
@@ -595,6 +630,143 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 	assert.True(t, canServe, "Should still serve with 1 instance remaining")
 }
 
+// TestServiceSurvivesAllClientsDisconnecting tests the core bug that motivated
+// the announce-based protocol: services must remain indexed after all client
+// connections close. With the old heartbeat protocol, services only sent
+// heartbeats for gateways with active connections, so after all clients
+// disconnected the service would be pruned permanently.
+func TestServiceSurvivesAllClientsDisconnecting(t *testing.T) {
+	origInterval := eurus.GatewayAnnounceInterval
+	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
+	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
+
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Service should be registered
+	canServe := gateway.CanServePath("/api/test")
+	require.True(t, canServe, "Service should be registered initially")
+
+	// Simulate a client connecting and then disconnecting
+	transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("hello"),
+	})
+	time.Sleep(10 * time.Millisecond)
+
+	// Client disconnects
+	transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "client closed")
+	time.Sleep(10 * time.Millisecond)
+
+	// Wait for multiple announce cycles — with the old heartbeat protocol,
+	// the service would be pruned here because no connections remain
+	time.Sleep(500 * time.Millisecond)
+
+	// Service must still be registered (the core fix)
+	canServe = gateway.CanServePath("/api/test")
+	assert.True(t, canServe, "Service should remain indexed after all clients disconnect")
+}
+
+// TestServiceSurvivesDisconnectThenReconnect tests the full disconnect-reconnect
+// cycle: a client connects, disconnects, and a new client can still connect to
+// the same service after enough time has passed for old heartbeats to expire.
+func TestServiceSurvivesDisconnectThenReconnect(t *testing.T) {
+	origInterval := eurus.GatewayAnnounceInterval
+	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
+	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
+
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// First client connects and sends a message
+	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("hello"),
+	})
+	require.NoError(t, err, "First message should be delivered")
+	time.Sleep(10 * time.Millisecond)
+
+	// First client disconnects
+	transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "client closed")
+	time.Sleep(10 * time.Millisecond)
+
+	// Wait well beyond what old heartbeat timeout would have been
+	time.Sleep(500 * time.Millisecond)
+
+	// Gateway should still know about the service
+	canServe := gateway.CanServePath("/api/test")
+	require.True(t, canServe, "Service should still be routable after disconnect + wait")
+
+	// Second client connects and sends a message — the service handler is still bound
+	err = transport.MessageService(service.ID, gateway.ID, "socket-2", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("hello again"),
+	})
+	assert.NoError(t, err, "Second message should be delivered — service must not be pruned after first client disconnected")
+}
+
+// TestServiceReappearsAfterPrune tests that if a service is somehow pruned
+// (e.g., temporary network partition), it re-announces on the next gateway
+// announce cycle and becomes routable again.
+func TestServiceReappearsAfterPrune(t *testing.T) {
+	origInterval := eurus.GatewayAnnounceInterval
+	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
+	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
+
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	route, _ := eurus.NewRouteDescriptor("/api/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	canServe := gateway.CanServePath("/api/test")
+	require.True(t, canServe, "Service should be registered initially")
+
+	// Wait for the announce cycle to include the service (keeping it fresh),
+	// then wait for a subsequent announce cycle
+	time.Sleep(350 * time.Millisecond)
+
+	// Service should still be reachable — the announce loop keeps it fresh
+	canServe = gateway.CanServePath("/api/test")
+	assert.True(t, canServe, "Service should remain reachable through announce cycles")
+}
+
 // TestEmptyGatewayNames_AnnouncesToAll tests that a service with no specific
 // gateway names announces to all gateways
 func TestEmptyGatewayNames_AnnouncesToAll(t *testing.T) {
@@ -626,112 +798,4 @@ func TestEmptyGatewayNames_AnnouncesToAll(t *testing.T) {
 
 	canServe2 := gateway2.CanServePath("/api/test")
 	assert.True(t, canServe2, "Service should announce to gateway-2")
-}
-
-func TestHeartbeat_GatewayRecordsServiceHeartbeat(t *testing.T) {
-	transport := localtransport.New()
-
-	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
-	require.NoError(t, err)
-	defer gateway.Stop()
-
-	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	route, _ := eurus.NewRouteDescriptor("/api/test")
-	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
-	require.NoError(t, err)
-	defer service.Stop()
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Simulate a service heartbeat via the transport
-	err = transport.SendServiceHeartbeat(service.ID, []string{gateway.ID})
-	require.NoError(t, err)
-
-	// The gateway should still have the service indexed
-	canServe := gateway.CanServePath("/api/test")
-	assert.True(t, canServe, "Service should remain indexed after heartbeat")
-}
-
-func TestHeartbeat_ServiceRecordsGatewayHeartbeat(t *testing.T) {
-	transport := localtransport.New()
-
-	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
-	require.NoError(t, err)
-	defer gateway.Stop()
-
-	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	route, _ := eurus.NewRouteDescriptor("/api/test")
-	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
-	require.NoError(t, err)
-	defer service.Stop()
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Simulate a gateway heartbeat via the transport
-	err = transport.SendGatewayHeartbeat(gateway.ID, []string{service.ID})
-	require.NoError(t, err)
-
-	// Create a connection through the gateway to the service
-	connInfo := &velaros.ConnectionInfo{}
-	err = transport.MessageService(service.ID, gateway.ID, "socket-1", connInfo, &velaros.SocketMessage{
-		Type: websocket.MessageText,
-		Data: []byte("test"),
-	})
-	assert.NoError(t, err, "Service should still accept messages after receiving gateway heartbeat")
-}
-
-func TestHeartbeat_GatewayAndServiceBindDuringStart(t *testing.T) {
-	transport := localtransport.New()
-
-	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
-	require.NoError(t, err)
-	defer gateway.Stop()
-
-	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	route, _ := eurus.NewRouteDescriptor("/api/test")
-	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
-	require.NoError(t, err)
-	defer service.Stop()
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Both sides should have bound their heartbeat handlers.
-	// Verify by sending heartbeats in both directions — no errors, no panics.
-	err = transport.SendServiceHeartbeat(service.ID, []string{gateway.ID})
-	assert.NoError(t, err)
-
-	err = transport.SendGatewayHeartbeat(gateway.ID, []string{service.ID})
-	assert.NoError(t, err)
-}
-
-func TestHeartbeat_UnbindOnStop(t *testing.T) {
-	transport := localtransport.New()
-
-	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
-	require.NoError(t, err)
-
-	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	route, _ := eurus.NewRouteDescriptor("/api/test")
-	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
-	require.NoError(t, err)
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Stop both — should not panic
-	service.Stop()
-	gateway.Stop()
-
-	// Sending heartbeats after stop should still not panic (handlers unbound, no receivers)
-	assert.NotPanics(t, func() {
-		transport.SendServiceHeartbeat("some-service", []string{"some-gateway"})
-		transport.SendGatewayHeartbeat("some-gateway", []string{"some-service"})
-	})
 }

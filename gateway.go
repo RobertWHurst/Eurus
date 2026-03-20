@@ -3,6 +3,7 @@ package eurus
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -11,17 +12,21 @@ import (
 )
 
 var (
-	gatewayDebug          = debug.Bind("eurus:gateway")
-	gatewayRouteDebug     = debug.Bind("eurus:gateway:route")
-	gatewayIndexerDebug   = debug.Bind("eurus:gateway:indexer")
-	gatewayHeartbeatDebug = debug.Bind("eurus:gateway:heartbeat")
+	gatewayDebug        = debug.Bind("eurus:gateway")
+	gatewayRouteDebug   = debug.Bind("eurus:gateway:route")
+	gatewayIndexerDebug = debug.Bind("eurus:gateway:indexer")
+	gatewayAnnounceDebug = debug.Bind("eurus:gateway:announce")
 )
+
+var GatewayAnnounceInterval = time.Duration(8+rand.IntN(2)) * time.Second
 
 type Gateway struct {
 	Name      string
 	ID        string
 	Transport Transport
 	gsi       *GatewayServiceIndexer
+
+	announceInterval time.Duration
 
 	socketsMu sync.Mutex
 	sockets   map[string]*velaros.Socket
@@ -33,11 +38,12 @@ var _ velaros.Handler = &Gateway{}
 
 func NewGateway(name string, transport Transport) *Gateway {
 	return &Gateway{
-		Name:      name,
-		ID:        generateID(),
-		Transport: transport,
-		sockets:   map[string]*velaros.Socket{},
-		stopChan:  make(chan struct{}),
+		Name:             name,
+		ID:               generateID(),
+		Transport:        transport,
+		announceInterval: GatewayAnnounceInterval,
+		sockets:          map[string]*velaros.Socket{},
+		stopChan:         make(chan struct{}),
 	}
 }
 
@@ -146,16 +152,8 @@ func (g *Gateway) Start() error {
 		return err
 	}
 
-	gatewayDebug.Trace("Binding service heartbeat handler")
-	if err := g.Transport.BindServiceHeartbeat(g.ID, func(serviceID string) {
-		gatewayHeartbeatDebug.Tracef("Received heartbeat from service %s", serviceID)
-		g.gsi.RecordHeartbeat(serviceID)
-	}); err != nil {
-		gatewayDebug.Tracef("Failed to bind service heartbeat handler: %v", err)
-		return err
-	}
-
-	go g.heartbeatLoop()
+	go g.announceLoop()
+	go g.pruneLoop()
 
 	gatewayDebug.Tracef("Announcing gateway %s", g.Name)
 
@@ -185,12 +183,6 @@ func (g *Gateway) Stop() {
 	gatewayDebug.Trace("Unbinding service announce handler")
 	if err := g.Transport.UnbindServiceAnnounce(); err != nil {
 		gatewayDebug.Tracef("Failed to unbind service announce: %v", err)
-		panic(err)
-	}
-
-	gatewayDebug.Trace("Unbinding service heartbeat handler")
-	if err := g.Transport.UnbindServiceHeartbeat(); err != nil {
-		gatewayDebug.Tracef("Failed to unbind service heartbeat handler: %v", err)
 		panic(err)
 	}
 
@@ -297,8 +289,8 @@ func (g *Gateway) HandleClose(ctx *velaros.Context) {
 	g.closeSocket(ctx.SocketID())
 }
 
-func (g *Gateway) heartbeatLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+func (g *Gateway) announceLoop() {
+	ticker := time.NewTicker(g.announceInterval)
 	defer ticker.Stop()
 
 	for {
@@ -306,22 +298,38 @@ func (g *Gateway) heartbeatLoop() {
 		case <-g.stopChan:
 			return
 		case <-ticker.C:
-			g.sendAndPruneHeartbeats()
+			freshThreshold := 3 * g.announceInterval
+			fresh := g.gsi.FreshServiceDescriptors(freshThreshold)
+
+			gatewayAnnounceDebug.Tracef("Announcing gateway with %d fresh services", len(fresh))
+			if err := g.Transport.AnnounceGateway(&GatewayDescriptor{
+				Name:               g.Name,
+				ServiceDescriptors: fresh,
+			}); err != nil {
+				gatewayAnnounceDebug.Tracef("Failed to announce gateway: %v", err)
+			}
 		}
 	}
 }
 
-func (g *Gateway) sendAndPruneHeartbeats() {
-	serviceIDs := g.gsi.ServiceIDs()
+func (g *Gateway) pruneLoop() {
+	ticker := time.NewTicker(g.announceInterval)
+	defer ticker.Stop()
 
-	if len(serviceIDs) > 0 {
-		gatewayHeartbeatDebug.Tracef("Sending heartbeat to %d services", len(serviceIDs))
-		if err := g.Transport.SendGatewayHeartbeat(g.ID, serviceIDs); err != nil {
-			gatewayHeartbeatDebug.Tracef("Failed to send heartbeat: %v", err)
+	for {
+		select {
+		case <-g.stopChan:
+			return
+		case <-ticker.C:
+			pruneThreshold := 5 * g.announceInterval
+			_, affectedSocketIDs := g.gsi.PruneStaleServices(pruneThreshold)
+
+			for _, socketID := range affectedSocketIDs {
+				gatewayAnnounceDebug.Tracef("Closing socket %s due to stale service", socketID)
+				g.closeSocket(socketID)
+			}
 		}
 	}
-
-	g.gsi.PruneStaleServices(10 * time.Second)
 }
 
 func (g *Gateway) closeSocket(socketID string) {

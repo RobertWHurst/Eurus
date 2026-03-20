@@ -2,19 +2,22 @@ package eurus
 
 import (
 	"fmt"
+	"slices"
 	"sync"
-	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/telemetryos/go-debug/debug"
 )
 
 var (
-	serviceDebug          = debug.Bind("eurus:service")
-	serviceAnnounceDebug  = debug.Bind("eurus:service:announce")
-	serviceHandleDebug    = debug.Bind("eurus:service:handler")
-	serviceHeartbeatDebug = debug.Bind("eurus:service:heartbeat")
+	serviceDebug         = debug.Bind("eurus:service")
+	serviceAnnounceDebug = debug.Bind("eurus:service:announce")
+	serviceHandleDebug   = debug.Bind("eurus:service:handler")
 )
+
+type routeDescriptorProvider interface {
+	RouteDescriptors() []*velaros.RouteDescriptor
+}
 
 // Service is a struct that facilitates communication between a go microservice
 // and a eurus gateway. It will manage the announcement of the service to the
@@ -57,11 +60,9 @@ type Service struct {
 	// either a Navaros router or a standard http.Router or http.HandlerFunc.
 	Router *velaros.Router
 
+	handler       any
 	connectionsMu sync.Mutex
 	connections   map[string]*Connection
-
-	lastGatewayHeartbeatMu sync.Mutex
-	lastGatewayHeartbeat   map[string]time.Time
 
 	stopChan chan struct{}
 }
@@ -79,13 +80,13 @@ func NewService(name string, transport Transport, handler any) *Service {
 	router.Use(handler)
 
 	return &Service{
-		Name:                 name,
-		ID:                   generateID(),
-		Transport:            transport,
-		Router:               router,
-		connections:          map[string]*Connection{},
-		lastGatewayHeartbeat: map[string]time.Time{},
-		stopChan:             make(chan struct{}),
+		Name:        name,
+		ID:          generateID(),
+		Transport:   transport,
+		Router:      router,
+		handler:     handler,
+		connections: map[string]*Connection{},
+		stopChan:    make(chan struct{}),
 	}
 }
 
@@ -131,19 +132,6 @@ func (s *Service) Start() error {
 		return err
 	}
 
-	serviceDebug.Trace("Binding gateway heartbeat handler")
-	if err := s.Transport.BindGatewayHeartbeat(s.ID, func(gatewayID string) {
-		serviceHeartbeatDebug.Tracef("Received heartbeat from gateway %s", gatewayID)
-		s.lastGatewayHeartbeatMu.Lock()
-		s.lastGatewayHeartbeat[gatewayID] = time.Now()
-		s.lastGatewayHeartbeatMu.Unlock()
-	}); err != nil {
-		serviceDebug.Tracef("Failed to bind gateway heartbeat handler: %v", err)
-		return err
-	}
-
-	go s.heartbeatLoop()
-
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
 		serviceDebug.Tracef("Failed to announce service: %v", err)
@@ -178,12 +166,6 @@ func (s *Service) Stop() {
 		panic(err)
 	}
 
-	serviceDebug.Trace("Unbinding gateway heartbeat handler")
-	if err := s.Transport.UnbindGatewayHeartbeat(); err != nil {
-		serviceDebug.Tracef("Failed to unbind gateway heartbeat handler: %v", err)
-		panic(err)
-	}
-
 	close(s.stopChan)
 	serviceDebug.Tracef("Service %s stopped successfully", s.Name)
 }
@@ -193,11 +175,8 @@ func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
 
 	isWantedGateway := len(s.GatewayNames) == 0
 	if !isWantedGateway {
-		for _, name := range s.GatewayNames {
-			if name == gatewayDescriptor.Name {
-				isWantedGateway = true
-				break
-			}
+		if slices.Contains(s.GatewayNames, gatewayDescriptor.Name) {
+			isWantedGateway = true
 		}
 	}
 	if !isWantedGateway {
@@ -246,12 +225,14 @@ func (s *Service) doAnnounce() error {
 	routeDescriptors := s.RouteDescriptors
 
 	if routeDescriptors == nil {
-		serviceAnnounceDebug.Trace("Extracting route descriptors from Navaros router")
-		velarosRouteDescriptors := s.Router.RouteDescriptors()
-		for _, velarosRouteDescriptor := range velarosRouteDescriptors {
-			routeDescriptors = append(routeDescriptors, &RouteDescriptor{
-				Pattern: velarosRouteDescriptor.Pattern,
-			})
+		if provider, ok := s.handler.(routeDescriptorProvider); ok {
+			serviceAnnounceDebug.Trace("Extracting route descriptors from handler")
+			velarosRouteDescriptors := provider.RouteDescriptors()
+			for _, velarosRouteDescriptor := range velarosRouteDescriptors {
+				routeDescriptors = append(routeDescriptors, &RouteDescriptor{
+					Pattern: velarosRouteDescriptor.Pattern,
+				})
+			}
 		}
 	}
 
@@ -300,65 +281,6 @@ func (s *Service) closeConnection(socketID string, status velaros.Status, reason
 
 	if ok {
 		connection.HandleClose(status, reason)
-	}
-}
-
-func (s *Service) heartbeatLoop() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.stopChan:
-			return
-		case <-ticker.C:
-			s.sendAndPruneHeartbeats()
-		}
-	}
-}
-
-func (s *Service) sendAndPruneHeartbeats() {
-	s.lastGatewayHeartbeatMu.Lock()
-	gatewayIDs := make([]string, 0, len(s.lastGatewayHeartbeat))
-	var deadGatewayIDs []string
-	now := time.Now()
-	for gatewayID, lastSeen := range s.lastGatewayHeartbeat {
-		if now.Sub(lastSeen) > 10*time.Second {
-			serviceHeartbeatDebug.Tracef("Gateway %s heartbeat stale, pruning", gatewayID)
-			deadGatewayIDs = append(deadGatewayIDs, gatewayID)
-			delete(s.lastGatewayHeartbeat, gatewayID)
-		} else {
-			gatewayIDs = append(gatewayIDs, gatewayID)
-		}
-	}
-	s.lastGatewayHeartbeatMu.Unlock()
-
-	if len(gatewayIDs) > 0 {
-		serviceHeartbeatDebug.Tracef("Sending heartbeat to %d gateways", len(gatewayIDs))
-		if err := s.Transport.SendServiceHeartbeat(s.ID, gatewayIDs); err != nil {
-			serviceHeartbeatDebug.Tracef("Failed to send heartbeat: %v", err)
-		}
-	}
-
-	for _, gatewayID := range deadGatewayIDs {
-		s.closeConnectionsByGateway(gatewayID)
-	}
-}
-
-func (s *Service) closeConnectionsByGateway(gatewayID string) {
-	s.connectionsMu.Lock()
-	var toClose []*Connection
-	for socketID, conn := range s.connections {
-		if conn.GatewayID() == gatewayID {
-			toClose = append(toClose, conn)
-			delete(s.connections, socketID)
-		}
-	}
-	s.connectionsMu.Unlock()
-
-	for _, conn := range toClose {
-		serviceHeartbeatDebug.Tracef("Closing connection for dead gateway %s", gatewayID)
-		conn.HandleClose(velaros.StatusGoingAway, "Gateway heartbeat timeout")
 	}
 }
 

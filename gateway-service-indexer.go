@@ -13,7 +13,6 @@ type GatewayServiceIndexer struct {
 	descriptors      []*ServiceDescriptor
 	servicesByName   map[string][]*ServiceDescriptor
 	socketToInstance map[string]map[string]string
-	lastHeartbeat    map[string]time.Time
 }
 
 func NewGatewayServiceIndexer() *GatewayServiceIndexer {
@@ -21,7 +20,6 @@ func NewGatewayServiceIndexer() *GatewayServiceIndexer {
 		descriptors:      []*ServiceDescriptor{},
 		servicesByName:   map[string][]*ServiceDescriptor{},
 		socketToInstance: map[string]map[string]string{},
-		lastHeartbeat:    map[string]time.Time{},
 	}
 }
 
@@ -32,7 +30,6 @@ func (r *GatewayServiceIndexer) Close() {
 	r.descriptors = nil
 	r.servicesByName = nil
 	r.socketToInstance = nil
-	r.lastHeartbeat = nil
 }
 
 func (r *GatewayServiceIndexer) IsClosed() bool {
@@ -49,13 +46,18 @@ func (r *GatewayServiceIndexer) SetServiceDescriptor(descriptor *ServiceDescript
 		return nil
 	}
 
+	now := time.Now()
+
 	instances := r.servicesByName[descriptor.Name]
 	for _, existing := range instances {
 		if existing.ID == descriptor.ID {
 			existing.RouteDescriptors = descriptor.RouteDescriptors
+			existing.LastSeenAt = &now
 			return nil
 		}
 	}
+
+	descriptor.LastSeenAt = &now
 	r.servicesByName[descriptor.Name] = append(instances, descriptor)
 	r.descriptors = append(r.descriptors, descriptor)
 
@@ -105,7 +107,7 @@ func (r *GatewayServiceIndexer) UnsetService(id string) error {
 	return nil
 }
 
-func (r *GatewayServiceIndexer) ServiceIDs() []string {
+func (r *GatewayServiceIndexer) FreshServiceDescriptors(threshold time.Duration) []*ServiceDescriptor {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -113,33 +115,43 @@ func (r *GatewayServiceIndexer) ServiceIDs() []string {
 		return nil
 	}
 
-	ids := make([]string, 0, len(r.descriptors))
+	now := time.Now()
+	var fresh []*ServiceDescriptor
 	for _, d := range r.descriptors {
-		ids = append(ids, d.ID)
+		if d.LastSeenAt != nil && now.Sub(*d.LastSeenAt) <= threshold {
+			fresh = append(fresh, d)
+		}
 	}
-	return ids
+	return fresh
 }
 
-func (r *GatewayServiceIndexer) RecordHeartbeat(serviceID string) {
+func (r *GatewayServiceIndexer) PruneStaleServices(threshold time.Duration) ([]string, []string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if r.closed {
-		return
+		r.mu.Unlock()
+		return nil, nil
 	}
 
-	r.lastHeartbeat[serviceID] = time.Now()
-}
-
-func (r *GatewayServiceIndexer) PruneStaleServices(timeout time.Duration) {
-	r.mu.Lock()
-
 	var staleIDs []string
+	var affectedSocketIDs []string
 	now := time.Now()
-	for serviceID, lastSeen := range r.lastHeartbeat {
-		if now.Sub(lastSeen) > timeout {
-			staleIDs = append(staleIDs, serviceID)
-			delete(r.lastHeartbeat, serviceID)
+
+	for _, d := range r.descriptors {
+		if d.LastSeenAt == nil || now.Sub(*d.LastSeenAt) > threshold {
+			staleIDs = append(staleIDs, d.ID)
+		}
+	}
+
+	// Collect affected socket IDs before removing services
+	for _, staleID := range staleIDs {
+		for socketID, services := range r.socketToInstance {
+			for _, instanceID := range services {
+				if instanceID == staleID {
+					affectedSocketIDs = append(affectedSocketIDs, socketID)
+					break
+				}
+			}
 		}
 	}
 
@@ -148,6 +160,8 @@ func (r *GatewayServiceIndexer) PruneStaleServices(timeout time.Duration) {
 	for _, id := range staleIDs {
 		r.UnsetService(id)
 	}
+
+	return staleIDs, affectedSocketIDs
 }
 
 func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {

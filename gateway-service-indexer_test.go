@@ -25,6 +25,23 @@ func TestGatewayServiceIndexer_SetServiceDescriptor_AddsNewService(t *testing.T)
 	assert.Equal(t, "instance-1", indexer.servicesByName["user-service"][0].ID)
 }
 
+func TestGatewayServiceIndexer_SetServiceDescriptor_SetsLastSeenAt(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	descriptor := &ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	}
+
+	before := time.Now()
+	indexer.SetServiceDescriptor(descriptor)
+
+	assert.NotNil(t, indexer.descriptors[0].LastSeenAt)
+	assert.False(t, indexer.descriptors[0].LastSeenAt.Before(before))
+}
+
 func TestGatewayServiceIndexer_SetServiceDescriptor_UpdatesExistingService(t *testing.T) {
 	indexer := NewGatewayServiceIndexer()
 
@@ -50,6 +67,26 @@ func TestGatewayServiceIndexer_SetServiceDescriptor_UpdatesExistingService(t *te
 	assert.Len(t, indexer.servicesByName["user-service"], 1)
 	assert.Len(t, indexer.servicesByName["user-service"][0].RouteDescriptors, 1)
 	assert.Equal(t, "/api/users/:id", indexer.servicesByName["user-service"][0].RouteDescriptors[0].Pattern.String())
+}
+
+func TestGatewayServiceIndexer_SetServiceDescriptor_UpdatesLastSeenAt(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
+	descriptor := &ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	}
+
+	indexer.SetServiceDescriptor(descriptor)
+	first := *indexer.descriptors[0].LastSeenAt
+
+	time.Sleep(time.Millisecond)
+	indexer.SetServiceDescriptor(descriptor)
+	second := *indexer.descriptors[0].LastSeenAt
+
+	assert.True(t, second.After(first))
 }
 
 func TestGatewayServiceIndexer_SetServiceDescriptor_AddsMultipleInstances(t *testing.T) {
@@ -338,11 +375,33 @@ func TestGatewayServiceIndexer_UnmapSocket_HandlesNonexistentSocket(t *testing.T
 	assert.Len(t, indexer.socketToInstance, 0)
 }
 
-func TestGatewayServiceIndexer_ServiceIDs_ReturnsAllIDs(t *testing.T) {
+func TestGatewayServiceIndexer_FreshServiceDescriptors_ReturnsFreshOnly(t *testing.T) {
 	indexer := NewGatewayServiceIndexer()
 
 	route, _ := NewRouteDescriptor("/api/users")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "stale-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
 
+	time.Sleep(5 * time.Millisecond)
+
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "fresh-1",
+		RouteDescriptors: []*RouteDescriptor{route},
+	})
+
+	fresh := indexer.FreshServiceDescriptors(2 * time.Millisecond)
+	assert.Len(t, fresh, 1)
+	assert.Equal(t, "fresh-1", fresh[0].ID)
+}
+
+func TestGatewayServiceIndexer_FreshServiceDescriptors_ReturnsAllWhenAllFresh(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route, _ := NewRouteDescriptor("/api/users")
 	indexer.SetServiceDescriptor(&ServiceDescriptor{
 		Name:             "svc-a",
 		ID:               "id-1",
@@ -354,13 +413,11 @@ func TestGatewayServiceIndexer_ServiceIDs_ReturnsAllIDs(t *testing.T) {
 		RouteDescriptors: []*RouteDescriptor{route},
 	})
 
-	ids := indexer.ServiceIDs()
-	assert.Len(t, ids, 2)
-	assert.Contains(t, ids, "id-1")
-	assert.Contains(t, ids, "id-2")
+	fresh := indexer.FreshServiceDescriptors(time.Hour)
+	assert.Len(t, fresh, 2)
 }
 
-func TestGatewayServiceIndexer_ServiceIDs_ReturnsNilWhenClosed(t *testing.T) {
+func TestGatewayServiceIndexer_FreshServiceDescriptors_ReturnsNilWhenClosed(t *testing.T) {
 	indexer := NewGatewayServiceIndexer()
 
 	route, _ := NewRouteDescriptor("/api/users")
@@ -372,40 +429,8 @@ func TestGatewayServiceIndexer_ServiceIDs_ReturnsNilWhenClosed(t *testing.T) {
 
 	indexer.Close()
 
-	ids := indexer.ServiceIDs()
-	assert.Nil(t, ids)
-}
-
-func TestGatewayServiceIndexer_RecordHeartbeat_RecordsTimestamp(t *testing.T) {
-	indexer := NewGatewayServiceIndexer()
-
-	before := time.Now()
-	indexer.RecordHeartbeat("service-1")
-
-	assert.Contains(t, indexer.lastHeartbeat, "service-1")
-	assert.False(t, indexer.lastHeartbeat["service-1"].Before(before))
-}
-
-func TestGatewayServiceIndexer_RecordHeartbeat_UpdatesTimestamp(t *testing.T) {
-	indexer := NewGatewayServiceIndexer()
-
-	indexer.RecordHeartbeat("service-1")
-	first := indexer.lastHeartbeat["service-1"]
-
-	time.Sleep(time.Millisecond)
-	indexer.RecordHeartbeat("service-1")
-	second := indexer.lastHeartbeat["service-1"]
-
-	assert.True(t, second.After(first))
-}
-
-func TestGatewayServiceIndexer_RecordHeartbeat_SafeWhenClosed(t *testing.T) {
-	indexer := NewGatewayServiceIndexer()
-	indexer.Close()
-
-	assert.NotPanics(t, func() {
-		indexer.RecordHeartbeat("service-1")
-	})
+	fresh := indexer.FreshServiceDescriptors(time.Hour)
+	assert.Nil(t, fresh)
 }
 
 func TestGatewayServiceIndexer_PruneStaleServices_RemovesStaleService(t *testing.T) {
@@ -418,14 +443,13 @@ func TestGatewayServiceIndexer_PruneStaleServices_RemovesStaleService(t *testing
 		RouteDescriptors: []*RouteDescriptor{route},
 	})
 
-	indexer.RecordHeartbeat("instance-1")
 	time.Sleep(5 * time.Millisecond)
 
-	indexer.PruneStaleServices(time.Millisecond)
+	prunedIDs, _ := indexer.PruneStaleServices(time.Millisecond)
 
 	assert.Len(t, indexer.descriptors, 0)
 	assert.Len(t, indexer.servicesByName, 0)
-	assert.Empty(t, indexer.lastHeartbeat)
+	assert.Contains(t, prunedIDs, "instance-1")
 }
 
 func TestGatewayServiceIndexer_PruneStaleServices_KeepsFreshService(t *testing.T) {
@@ -438,13 +462,11 @@ func TestGatewayServiceIndexer_PruneStaleServices_KeepsFreshService(t *testing.T
 		RouteDescriptors: []*RouteDescriptor{route},
 	})
 
-	indexer.RecordHeartbeat("instance-1")
-
-	indexer.PruneStaleServices(time.Hour)
+	prunedIDs, _ := indexer.PruneStaleServices(time.Hour)
 
 	assert.Len(t, indexer.descriptors, 1)
 	assert.Len(t, indexer.servicesByName["user-service"], 1)
-	assert.Contains(t, indexer.lastHeartbeat, "instance-1")
+	assert.Empty(t, prunedIDs)
 }
 
 func TestGatewayServiceIndexer_PruneStaleServices_PrunesOnlyStale(t *testing.T) {
@@ -456,25 +478,24 @@ func TestGatewayServiceIndexer_PruneStaleServices_PrunesOnlyStale(t *testing.T) 
 		ID:               "stale-1",
 		RouteDescriptors: []*RouteDescriptor{route},
 	})
+
+	time.Sleep(5 * time.Millisecond)
+
 	indexer.SetServiceDescriptor(&ServiceDescriptor{
 		Name:             "user-service",
 		ID:               "fresh-1",
 		RouteDescriptors: []*RouteDescriptor{route},
 	})
 
-	indexer.RecordHeartbeat("stale-1")
-	time.Sleep(5 * time.Millisecond)
-	indexer.RecordHeartbeat("fresh-1")
-
-	indexer.PruneStaleServices(2 * time.Millisecond)
+	prunedIDs, _ := indexer.PruneStaleServices(2 * time.Millisecond)
 
 	assert.Len(t, indexer.descriptors, 1)
 	assert.Equal(t, "fresh-1", indexer.descriptors[0].ID)
-	assert.NotContains(t, indexer.lastHeartbeat, "stale-1")
-	assert.Contains(t, indexer.lastHeartbeat, "fresh-1")
+	assert.Contains(t, prunedIDs, "stale-1")
+	assert.NotContains(t, prunedIDs, "fresh-1")
 }
 
-func TestGatewayServiceIndexer_PruneStaleServices_CleansUpSocketMappings(t *testing.T) {
+func TestGatewayServiceIndexer_PruneStaleServices_ReturnsAffectedSocketIDs(t *testing.T) {
 	indexer := NewGatewayServiceIndexer()
 
 	route, _ := NewRouteDescriptor("/api/users")
@@ -485,12 +506,14 @@ func TestGatewayServiceIndexer_PruneStaleServices_CleansUpSocketMappings(t *test
 	})
 
 	indexer.MapSocket("user-service", "socket-1")
-	indexer.RecordHeartbeat("instance-1")
+	indexer.MapSocket("user-service", "socket-2")
 	time.Sleep(5 * time.Millisecond)
 
-	indexer.PruneStaleServices(time.Millisecond)
+	_, affectedSocketIDs := indexer.PruneStaleServices(time.Millisecond)
 
 	assert.Len(t, indexer.socketToInstance, 0)
+	assert.Contains(t, affectedSocketIDs, "socket-1")
+	assert.Contains(t, affectedSocketIDs, "socket-2")
 }
 
 func TestGatewayServiceIndexer_PruneStaleServices_SafeWhenClosed(t *testing.T) {

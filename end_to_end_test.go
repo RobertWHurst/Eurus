@@ -402,6 +402,93 @@ func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
 	t.Logf("Read after service crash: err=%v", err)
 }
 
+// TestEndToEnd_DisconnectThenReconnect tests the core bug fix: after all WebSocket
+// clients disconnect, the service remains indexed and new clients can connect.
+// With the old heartbeat protocol, services were pruned after all connections closed.
+func TestEndToEnd_DisconnectThenReconnect(t *testing.T) {
+	origInterval := eurus.GatewayAnnounceInterval
+	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
+	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
+
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	router := velaros.NewRouter()
+	router.Use(json.Middleware())
+	router.Use(gateway)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	route, err := eurus.NewRouteDescriptor("/api/*")
+	require.NoError(t, err)
+
+	serviceRouter := velaros.NewRouter()
+	serviceRouter.Use(json.Middleware())
+	service := eurus.NewService("test-service", transport, serviceRouter)
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	instanceID := service.ID
+
+	serviceRouter.Bind("/api/ping", func(ctx *velaros.Context) {
+		ctx.Send(map[string]any{"instance_id": instanceID})
+	})
+
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(10 * time.Millisecond)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	// First connection — connect, send message, verify response
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel1()
+
+	conn1, _, err := websocket.Dial(ctx1, wsURL, nil)
+	require.NoError(t, err)
+
+	err = wsjson.Write(ctx1, conn1, map[string]any{"id": "1", "path": "/api/ping"})
+	require.NoError(t, err)
+
+	var resp1 map[string]any
+	err = wsjson.Read(ctx1, conn1, &resp1)
+	require.NoError(t, err)
+	data1 := resp1["data"].(map[string]any)
+	assert.Equal(t, instanceID, data1["instance_id"])
+	t.Logf("First connection got response from instance %s", instanceID[:8])
+
+	// Close the first connection (all clients disconnected)
+	conn1.Close(websocket.StatusNormalClosure, "done")
+
+	// Wait well past what old heartbeat timeout would have been.
+	// With the old protocol, the service would be pruned here.
+	time.Sleep(500 * time.Millisecond)
+
+	// Second connection — should still be routable
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+
+	conn2, _, err := websocket.Dial(ctx2, wsURL, nil)
+	require.NoError(t, err)
+	defer conn2.Close(websocket.StatusNormalClosure, "done")
+
+	err = wsjson.Write(ctx2, conn2, map[string]any{"id": "2", "path": "/api/ping"})
+	require.NoError(t, err)
+
+	var resp2 map[string]any
+	err = wsjson.Read(ctx2, conn2, &resp2)
+	require.NoError(t, err, "Second connection should succeed — service must not be pruned after first client disconnects")
+
+	data2 := resp2["data"].(map[string]any)
+	assert.Equal(t, instanceID, data2["instance_id"])
+	t.Logf("Second connection (after disconnect+wait) got response from instance %s", instanceID[:8])
+}
+
 // TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy tests that after a service
 // instance stops, new WebSocket connections are routed to a surviving instance.
 func TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy(t *testing.T) {
