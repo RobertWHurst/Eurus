@@ -52,7 +52,10 @@ func (c *Connection) GatewayID() string {
 }
 
 func (c *Connection) HandleMessage(msg *velaros.SocketMessage) {
-	c.messageChan <- msg
+	select {
+	case c.messageChan <- msg:
+	case <-c.ctx.Done():
+	}
 }
 
 func (c *Connection) HandleClose(status velaros.Status, reason string) {

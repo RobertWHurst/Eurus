@@ -144,7 +144,9 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	subject := namespace("service", serviceID, "message")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
+		t.messageHandlerWg.Add(1)
 		go func() {
+			defer t.messageHandlerWg.Done()
 			if err := t.handleServiceMessage(msg, handler); err != nil {
 				transportNatsMessageDebug.Tracef("Error handling service message: %v", err)
 			}
@@ -258,7 +260,11 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 // UnbindMessageService unbinds the message handler for a service
 func (t *NatsTransport) UnbindMessageService(serviceID string) error {
 	if unbind, ok := t.unbindMessageService[serviceID]; ok {
-		return unbind()
+		if err := unbind(); err != nil {
+			return err
+		}
+		delete(t.unbindMessageService, serviceID)
 	}
+	t.messageHandlerWg.Wait()
 	return nil
 }

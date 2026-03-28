@@ -1,6 +1,8 @@
 package natstransport
 
 import (
+	"sync"
+
 	"github.com/RobertWHurst/eurus"
 	"github.com/nats-io/nats.go"
 )
@@ -12,6 +14,8 @@ type NatsTransport struct {
 	unbindMessageService  map[string]func() error
 	unbindMessageGateway  map[string]func() error
 	unbindSocketClosed    func() error
+	unbindSocketHeartbeat func() error
+	messageHandlerWg      sync.WaitGroup
 }
 
 var _ eurus.Transport = &NatsTransport{}

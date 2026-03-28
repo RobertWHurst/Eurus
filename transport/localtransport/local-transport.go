@@ -16,12 +16,13 @@ var (
 )
 
 type LocalTransport struct {
-	mu                      sync.RWMutex
-	gatewayAnnounceHandlers []func(gatewayDescriptor *eurus.GatewayDescriptor)
-	serviceAnnounceHandlers []func(serviceDescriptor *eurus.ServiceDescriptor)
-	serviceMessageHandlers  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)
-	gatewayMessageHandlers  map[string]func(socketID string, msg *velaros.SocketMessage)
-	socketClosedHandlers    []func(socketID string, status websocket.StatusCode, reason string)
+	mu                       sync.RWMutex
+	gatewayAnnounceHandlers  []func(gatewayDescriptor *eurus.GatewayDescriptor)
+	serviceAnnounceHandlers  []func(serviceDescriptor *eurus.ServiceDescriptor)
+	serviceMessageHandlers   map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)
+	gatewayMessageHandlers   map[string]func(socketID string, msg *velaros.SocketMessage)
+	socketClosedHandlers     []func(socketID string, status websocket.StatusCode, reason string)
+	socketHeartbeatHandlers  []func(socketID string)
 }
 
 var _ eurus.Transport = &LocalTransport{}

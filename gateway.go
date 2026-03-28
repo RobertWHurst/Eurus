@@ -19,6 +19,7 @@ var (
 )
 
 var GatewayAnnounceInterval = time.Duration(8+rand.IntN(2)) * time.Second
+var HeartbeatInterval = 5 * time.Second
 
 type Gateway struct {
 	Name      string
@@ -26,7 +27,8 @@ type Gateway struct {
 	Transport Transport
 	gsi       *GatewayServiceIndexer
 
-	announceInterval time.Duration
+	AnnounceInterval  time.Duration
+	HeartbeatInterval time.Duration
 
 	socketsMu sync.Mutex
 	sockets   map[string]*velaros.Socket
@@ -38,12 +40,13 @@ var _ velaros.Handler = &Gateway{}
 
 func NewGateway(name string, transport Transport) *Gateway {
 	return &Gateway{
-		Name:             name,
-		ID:               generateID(),
-		Transport:        transport,
-		announceInterval: GatewayAnnounceInterval,
-		sockets:          map[string]*velaros.Socket{},
-		stopChan:         make(chan struct{}),
+		Name:              name,
+		ID:                generateID(),
+		Transport:         transport,
+		AnnounceInterval:  GatewayAnnounceInterval,
+		HeartbeatInterval: HeartbeatInterval,
+		sockets:           map[string]*velaros.Socket{},
+		stopChan:          make(chan struct{}),
 	}
 }
 
@@ -110,8 +113,8 @@ func (g *Gateway) Start() error {
 
 		gatewayRouteDebug.Tracef("Routing message to socket %s", socketID)
 		sendCtx, sendCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer sendCancel()
 		err := socket.SendWithContext(sendCtx, msg.Type, msg.Data)
-		sendCancel()
 		if err != nil {
 			gatewayRouteDebug.Tracef("Failed to route message to socket %s: %v", socketID, err)
 			gatewayRouteDebug.Tracef("Closing socket %s due to send failure", socketID)
@@ -141,7 +144,10 @@ func (g *Gateway) Start() error {
 		}
 
 		socket.Close(status, reason, velaros.ServerCloseSource)
+
+		g.socketsMu.Lock()
 		delete(g.sockets, socketID)
+		g.socketsMu.Unlock()
 
 		if err := g.Transport.ClosedSocket(socketID, status, reason); err != nil {
 			gatewayDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
@@ -154,6 +160,7 @@ func (g *Gateway) Start() error {
 
 	go g.announceLoop()
 	go g.pruneLoop()
+	go g.heartbeatLoop()
 
 	gatewayDebug.Tracef("Announcing gateway %s", g.Name)
 
@@ -183,6 +190,24 @@ func (g *Gateway) Stop() {
 	gatewayDebug.Trace("Unbinding service announce handler")
 	if err := g.Transport.UnbindServiceAnnounce(); err != nil {
 		gatewayDebug.Tracef("Failed to unbind service announce: %v", err)
+		panic(err)
+	}
+
+	gatewayDebug.Trace("Unbinding message gateway handler")
+	if err := g.Transport.UnbindMessageGateway(g.ID); err != nil {
+		gatewayDebug.Tracef("Failed to unbind message gateway: %v", err)
+		panic(err)
+	}
+
+	gatewayDebug.Trace("Unbinding socket closed handler")
+	if err := g.Transport.UnbindSocketClosed(); err != nil {
+		gatewayDebug.Tracef("Failed to unbind socket closed: %v", err)
+		panic(err)
+	}
+
+	gatewayDebug.Trace("Unbinding socket heartbeat handler")
+	if err := g.Transport.UnbindSocketHeartbeat(); err != nil {
+		gatewayDebug.Tracef("Failed to unbind socket heartbeat: %v", err)
 		panic(err)
 	}
 
@@ -290,7 +315,7 @@ func (g *Gateway) HandleClose(ctx *velaros.Context) {
 }
 
 func (g *Gateway) announceLoop() {
-	ticker := time.NewTicker(g.announceInterval)
+	ticker := time.NewTicker(g.AnnounceInterval)
 	defer ticker.Stop()
 
 	for {
@@ -298,7 +323,7 @@ func (g *Gateway) announceLoop() {
 		case <-g.stopChan:
 			return
 		case <-ticker.C:
-			freshThreshold := 3 * g.announceInterval
+			freshThreshold := 3 * g.AnnounceInterval
 			fresh := g.gsi.FreshServiceDescriptors(freshThreshold)
 
 			gatewayAnnounceDebug.Tracef("Announcing gateway with %d fresh services", len(fresh))
@@ -313,7 +338,7 @@ func (g *Gateway) announceLoop() {
 }
 
 func (g *Gateway) pruneLoop() {
-	ticker := time.NewTicker(g.announceInterval)
+	ticker := time.NewTicker(g.AnnounceInterval)
 	defer ticker.Stop()
 
 	for {
@@ -321,12 +346,38 @@ func (g *Gateway) pruneLoop() {
 		case <-g.stopChan:
 			return
 		case <-ticker.C:
-			pruneThreshold := 5 * g.announceInterval
+			pruneThreshold := 5 * g.AnnounceInterval
 			_, affectedSocketIDs := g.gsi.PruneStaleServices(pruneThreshold)
 
 			for _, socketID := range affectedSocketIDs {
 				gatewayAnnounceDebug.Tracef("Closing socket %s due to stale service", socketID)
 				g.closeSocket(socketID)
+			}
+		}
+	}
+}
+
+func (g *Gateway) heartbeatLoop() {
+	ticker := time.NewTicker(g.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopChan:
+			return
+		case <-ticker.C:
+			g.socketsMu.Lock()
+			socketIDs := make([]string, 0, len(g.sockets))
+			for socketID := range g.sockets {
+				socketIDs = append(socketIDs, socketID)
+			}
+			g.socketsMu.Unlock()
+
+			// Send heartbeat for each active socket
+			for _, socketID := range socketIDs {
+				if err := g.Transport.HeartbeatSocket(socketID); err != nil {
+					gatewayAnnounceDebug.Tracef("Error sending heartbeat for socket %s: %v", socketID, err)
+				}
 			}
 		}
 	}

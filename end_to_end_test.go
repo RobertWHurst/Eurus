@@ -406,13 +406,10 @@ func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
 // clients disconnect, the service remains indexed and new clients can connect.
 // With the old heartbeat protocol, services were pruned after all connections closed.
 func TestEndToEnd_DisconnectThenReconnect(t *testing.T) {
-	origInterval := eurus.GatewayAnnounceInterval
-	eurus.GatewayAnnounceInterval = 100 * time.Millisecond
-	defer func() { eurus.GatewayAnnounceInterval = origInterval }()
-
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
+	gateway.AnnounceInterval = 100 * time.Millisecond
 	err := gateway.Start()
 	require.NoError(t, err)
 	defer gateway.Stop()

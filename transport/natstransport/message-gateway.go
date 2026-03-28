@@ -136,7 +136,9 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	subject := namespace("gateway", gatewayID, "message")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
+		t.messageHandlerWg.Add(1)
 		go func() {
+			defer t.messageHandlerWg.Done()
 			if err := t.handleGatewayMessage(msg, handler); err != nil {
 				transportNatsMessageDebug.Tracef("Error handling gateway message: %v", err)
 			}
@@ -246,7 +248,11 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 // UnbindMessageGateway unbinds the message handler for a gateway
 func (t *NatsTransport) UnbindMessageGateway(gatewayID string) error {
 	if unbind, ok := t.unbindMessageGateway[gatewayID]; ok {
-		return unbind()
+		if err := unbind(); err != nil {
+			return err
+		}
+		delete(t.unbindMessageGateway, gatewayID)
 	}
+	t.messageHandlerWg.Wait()
 	return nil
 }

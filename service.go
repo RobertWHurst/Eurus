@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/telemetryos/go-debug/debug"
@@ -13,6 +14,12 @@ var (
 	serviceDebug         = debug.Bind("eurus:service")
 	serviceAnnounceDebug = debug.Bind("eurus:service:announce")
 	serviceHandleDebug   = debug.Bind("eurus:service:handler")
+)
+
+var (
+	ServicePruneInterval = 10 * time.Second
+	ClosedSocketTTL      = 30 * time.Second
+	HeartbeatTimeout     = 30 * time.Second
 )
 
 type routeDescriptorProvider interface {
@@ -63,6 +70,12 @@ type Service struct {
 	handler       any
 	connectionsMu sync.Mutex
 	connections   map[string]*Connection
+	closedSockets map[string]time.Time
+	lastHeartbeat map[string]time.Time
+
+	PruneInterval    time.Duration
+	ClosedSocketTTL  time.Duration
+	HeartbeatTimeout time.Duration
 
 	stopChan chan struct{}
 }
@@ -80,13 +93,18 @@ func NewService(name string, transport Transport, handler any) *Service {
 	router.Use(handler)
 
 	return &Service{
-		Name:        name,
-		ID:          generateID(),
-		Transport:   transport,
-		Router:      router,
-		handler:     handler,
-		connections: map[string]*Connection{},
-		stopChan:    make(chan struct{}),
+		Name:             name,
+		ID:               generateID(),
+		Transport:        transport,
+		Router:           router,
+		handler:          handler,
+		connections:      map[string]*Connection{},
+		closedSockets:    map[string]time.Time{},
+		lastHeartbeat:    map[string]time.Time{},
+		PruneInterval:    ServicePruneInterval,
+		ClosedSocketTTL:  ClosedSocketTTL,
+		HeartbeatTimeout: HeartbeatTimeout,
+		stopChan:         make(chan struct{}),
 	}
 }
 
@@ -117,6 +135,10 @@ func (s *Service) Start() error {
 	if err := s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 		serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
 		connection := s.ensureConnection(gatewayID, socketID, connInfo)
+		if connection == nil {
+			serviceHandleDebug.Tracef("Dropping message for recently closed socket %s", socketID)
+			return
+		}
 		connection.HandleMessage(msg)
 	}); err != nil {
 		serviceDebug.Tracef("Failed to bind service message handler: %v", err)
@@ -131,6 +153,19 @@ func (s *Service) Start() error {
 		serviceDebug.Tracef("Failed to bind close socket handler: %v", err)
 		return err
 	}
+
+	serviceDebug.Trace("Binding socket heartbeat handler")
+	if err := s.Transport.BindSocketHeartbeat(func(socketID string) {
+		s.connectionsMu.Lock()
+		s.lastHeartbeat[socketID] = time.Now()
+		s.connectionsMu.Unlock()
+	}); err != nil {
+		serviceDebug.Tracef("Failed to bind socket heartbeat handler: %v", err)
+		return err
+	}
+
+	serviceDebug.Trace("Starting prune loop")
+	go s.pruneLoop()
 
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
@@ -163,6 +198,18 @@ func (s *Service) Stop() {
 	serviceDebug.Trace("Unbinding dispatch handler")
 	if err := s.Transport.UnbindMessageService(s.ID); err != nil {
 		serviceDebug.Tracef("Failed to unbind dispatch handler: %v", err)
+		panic(err)
+	}
+
+	serviceDebug.Trace("Unbinding socket closed handler")
+	if err := s.Transport.UnbindSocketClosed(); err != nil {
+		serviceDebug.Tracef("Failed to unbind socket closed handler: %v", err)
+		panic(err)
+	}
+
+	serviceDebug.Trace("Unbinding socket heartbeat handler")
+	if err := s.Transport.UnbindSocketHeartbeat(); err != nil {
+		serviceDebug.Tracef("Failed to unbind socket heartbeat handler: %v", err)
 		panic(err)
 	}
 
@@ -257,6 +304,11 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 	s.connectionsMu.Lock()
 	defer s.connectionsMu.Unlock()
 
+	if _, wasClosed := s.closedSockets[socketID]; wasClosed {
+		serviceHandleDebug.Tracef("Rejecting connection creation for recently closed socket %s", socketID)
+		return nil
+	}
+
 	if connection, ok := s.connections[socketID]; ok {
 		return connection
 	}
@@ -269,6 +321,7 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 
 	go s.Router.HandleConnection(info, connection)
 	s.connections[socketID] = connection
+	s.lastHeartbeat[socketID] = time.Now()
 
 	return connection
 }
@@ -277,6 +330,8 @@ func (s *Service) closeConnection(socketID string, status velaros.Status, reason
 	s.connectionsMu.Lock()
 	connection, ok := s.connections[socketID]
 	delete(s.connections, socketID)
+	delete(s.lastHeartbeat, socketID)
+	s.closedSockets[socketID] = time.Now()
 	s.connectionsMu.Unlock()
 
 	if ok {
@@ -295,5 +350,55 @@ func (s *Service) closeAllConnections() {
 
 	for _, c := range connections {
 		c.HandleClose(velaros.StatusGoingAway, "Service is stopping")
+	}
+}
+
+func (s *Service) pruneLoop() {
+	ticker := time.NewTicker(s.PruneInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.pruneStaleResources()
+		}
+	}
+}
+
+func (s *Service) pruneStaleResources() {
+	s.connectionsMu.Lock()
+	defer s.connectionsMu.Unlock()
+
+	now := time.Now()
+
+	for socketID, closedAt := range s.closedSockets {
+		if now.Sub(closedAt) > s.ClosedSocketTTL {
+			serviceHandleDebug.Tracef("Pruning closed socket record for %s", socketID)
+			delete(s.closedSockets, socketID)
+		}
+	}
+
+	staleConnections := []string{}
+	for socketID := range s.connections {
+		lastHB, hasHeartbeat := s.lastHeartbeat[socketID]
+		if !hasHeartbeat || now.Sub(lastHB) > s.HeartbeatTimeout {
+			serviceHandleDebug.Tracef("Connection %s has stale heartbeat, closing", socketID)
+			staleConnections = append(staleConnections, socketID)
+		}
+	}
+
+	for _, socketID := range staleConnections {
+		connection, ok := s.connections[socketID]
+		delete(s.connections, socketID)
+		delete(s.lastHeartbeat, socketID)
+		s.closedSockets[socketID] = now
+
+		if ok {
+			s.connectionsMu.Unlock()
+			connection.HandleClose(velaros.StatusGoingAway, "No heartbeat received")
+			s.connectionsMu.Lock()
+		}
 	}
 }

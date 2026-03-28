@@ -1,6 +1,7 @@
 package eurus_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -199,13 +200,12 @@ func TestMessageDelivery_GatewayStops(t *testing.T) {
 	// Stop gateway
 	gateway.Stop()
 
-	// Try to send a message back to the gateway (should not panic)
-	// Note: Gateway.Stop() does not unbind the message handler, so this succeeds
+	// Try to send a message back to the gateway (should error - handler unbound)
 	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Message to stopped gateway should not error (handler still bound)")
+	assert.Error(t, err, "Message to stopped gateway should error (handler unbound)")
 }
 
 // TestMultipleGateways_ServiceSelectiveAnnouncement tests that a service
@@ -532,13 +532,12 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	// Stop gateway
 	gateway.Stop()
 
-	// Writing to stopped gateway should not panic
-	// Note: Gateway.Stop() does not unbind the message handler, so this succeeds
+	// Writing to stopped gateway should error (handler unbound)
 	err = conn.Write(nil, &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	})
-	assert.NoError(t, err, "Writing to stopped gateway should not error (handler still bound)")
+	assert.Error(t, err, "Writing to stopped gateway should error (handler unbound)")
 
 	// Closing connection should not panic
 	err = conn.Close(websocket.StatusNormalClosure, "test")
@@ -798,4 +797,197 @@ func TestEmptyGatewayNames_AnnouncesToAll(t *testing.T) {
 
 	canServe2 := gateway2.CanServePath("/api/test")
 	assert.True(t, canServe2, "Service should announce to gateway-2")
+}
+
+// TestGateway_Stop_UnbindsAllHandlers tests that gateway Stop() properly
+// unbinds all transport handlers
+func TestGateway_Stop_UnbindsAllHandlers(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	gateway.Stop()
+
+	// Try to send messages after stop - should error (no handler bound)
+	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	})
+	assert.Error(t, err, "MessageGateway should error after gateway stops")
+}
+
+// TestGateway_HeartbeatLoop_StopsCleanly tests that heartbeat loop exits
+// when gateway stops
+func TestGateway_HeartbeatLoop_StopsCleanly(t *testing.T) {
+	transport := localtransport.New()
+
+	heartbeatsSent := 0
+	err := transport.BindSocketHeartbeat(func(socketID string) {
+		heartbeatsSent++
+	})
+	require.NoError(t, err)
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	gateway.HeartbeatInterval = 50 * time.Millisecond
+	err = gateway.Start()
+	require.NoError(t, err)
+
+	time.Sleep(120 * time.Millisecond)
+	countBeforeStop := heartbeatsSent
+
+	gateway.Stop()
+	time.Sleep(120 * time.Millisecond)
+
+	// No new heartbeats should be sent
+	assert.Equal(t, countBeforeStop, heartbeatsSent, "Heartbeat loop should stop")
+}
+
+// TestGateway_ProtectedMapDeletion_NoRace tests that concurrent socket
+// operations don't cause races
+func TestGateway_ProtectedMapDeletion_NoRace(t *testing.T) {
+	transport := localtransport.New()
+
+	gateway := eurus.NewGateway("test-gateway", transport)
+	err := gateway.Start()
+	require.NoError(t, err)
+	defer gateway.Stop()
+
+	done := make(chan bool, 2)
+
+	// Concurrent close events
+	go func() {
+		for i := 0; i < 50; i++ {
+			transport.ClosedSocket("socket-race", websocket.StatusNormalClosure, "test")
+			time.Sleep(2 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// Concurrent heartbeats
+	go func() {
+		for i := 0; i < 50; i++ {
+			transport.HeartbeatSocket("socket-race")
+			time.Sleep(2 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	<-done
+	<-done
+}
+
+// TestService_HighConnectionChurn_BoundedMemory tests that rapid
+// connect/disconnect doesn't cause unbounded memory growth
+func TestService_HighConnectionChurn_BoundedMemory(t *testing.T) {
+	transport := localtransport.New()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	service.ClosedSocketTTL = 100 * time.Millisecond
+	service.PruneInterval = 30 * time.Millisecond
+	err := service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	connInfo := &velaros.ConnectionInfo{}
+	msg := &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	}
+
+	// High churn - 200 rapid connect/disconnect cycles
+	for i := 0; i < 200; i++ {
+		socketID := fmt.Sprintf("churn-socket-%d", i)
+		
+		err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
+		require.NoError(t, err)
+		
+		err = transport.ClosedSocket(socketID, websocket.StatusNormalClosure, "churn")
+		require.NoError(t, err)
+	}
+
+	// Wait for multiple prune cycles
+	time.Sleep(200 * time.Millisecond)
+
+	// Memory should be bounded (closed sockets pruned)
+}
+
+// TestService_MultipleStartStop_NoLeaks tests that restarting a service
+// multiple times doesn't leak goroutines or handlers
+func TestService_MultipleStartStop_NoLeaks(t *testing.T) {
+	transport := localtransport.New()
+
+	for cycle := 0; cycle < 5; cycle++ {
+		service := eurus.NewService(fmt.Sprintf("test-service-%d", cycle), transport, velaros.NewRouter())
+		err := service.Start()
+		require.NoError(t, err)
+
+		connInfo := &velaros.ConnectionInfo{}
+		msg := &velaros.SocketMessage{
+			Type: websocket.MessageText,
+			Data: []byte("test"),
+		}
+
+		// Create connections
+		for i := 0; i < 5; i++ {
+			socketID := fmt.Sprintf("restart-socket-%d-%d", cycle, i)
+			err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
+			require.NoError(t, err)
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		service.Stop()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestConnection_SendToClosedConnection_NoError tests that sending messages
+// to a closed connection doesn't cause issues
+func TestConnection_SendToClosedConnection_NoError(t *testing.T) {
+	transport := localtransport.New()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	err := service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	socketID := "test-socket-send-closed"
+	connInfo := &velaros.ConnectionInfo{}
+	msg := &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	}
+
+	// Create connection
+	err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Close connection
+	err = transport.ClosedSocket(socketID, websocket.StatusNormalClosure, "test")
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Try sending many messages to closed connection concurrently
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			for j := 0; j < 10; j++ {
+				transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
+				time.Sleep(1 * time.Millisecond)
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 10; i++ {
+		<-done
+	}
 }
