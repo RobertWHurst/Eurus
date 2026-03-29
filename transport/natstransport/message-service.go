@@ -146,6 +146,8 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
 		t.messageHandlerWg.Add(1)
 		go func() {
+			t.handlerSem <- struct{}{}
+			defer func() { <-t.handlerSem }()
 			defer t.messageHandlerWg.Done()
 			if err := t.handleServiceMessage(msg, handler); err != nil {
 				transportNatsMessageDebug.Tracef("Error handling service message: %v", err)
