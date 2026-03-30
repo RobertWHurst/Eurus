@@ -67,7 +67,10 @@ func (r *GatewayServiceIndexer) SetServiceDescriptor(descriptor *ServiceDescript
 func (r *GatewayServiceIndexer) UnsetService(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.unsetServiceLocked(id)
+}
 
+func (r *GatewayServiceIndexer) unsetServiceLocked(id string) error {
 	if r.closed {
 		return nil
 	}
@@ -107,6 +110,18 @@ func (r *GatewayServiceIndexer) UnsetService(id string) error {
 	return nil
 }
 
+// ServiceDescriptors returns a snapshot of all current service descriptors.
+func (r *GatewayServiceIndexer) ServiceDescriptors() []*ServiceDescriptor {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
+
+	return slices.Clone(r.descriptors)
+}
+
 func (r *GatewayServiceIndexer) FreshServiceDescriptors(threshold time.Duration) []*ServiceDescriptor {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -127,9 +142,9 @@ func (r *GatewayServiceIndexer) FreshServiceDescriptors(threshold time.Duration)
 
 func (r *GatewayServiceIndexer) PruneStaleServices(threshold time.Duration) ([]string, []string) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if r.closed {
-		r.mu.Unlock()
 		return nil, nil
 	}
 
@@ -143,22 +158,27 @@ func (r *GatewayServiceIndexer) PruneStaleServices(threshold time.Duration) ([]s
 		}
 	}
 
-	// Collect affected socket IDs before removing services
+	// Collect affected socket IDs before removing services, deduplicating
+	// to avoid double-close when a socket maps to multiple stale instances.
+	seen := make(map[string]struct{})
 	for _, staleID := range staleIDs {
 		for socketID, services := range r.socketToInstance {
 			for _, instanceID := range services {
 				if instanceID == staleID {
-					affectedSocketIDs = append(affectedSocketIDs, socketID)
+					if _, ok := seen[socketID]; !ok {
+						seen[socketID] = struct{}{}
+						affectedSocketIDs = append(affectedSocketIDs, socketID)
+					}
 					break
 				}
 			}
 		}
 	}
 
-	r.mu.Unlock()
-
+	// Remove stale services while still holding the lock to avoid TOCTOU
+	// races with concurrent SetServiceDescriptor calls.
 	for _, id := range staleIDs {
-		r.UnsetService(id)
+		r.unsetServiceLocked(id)
 	}
 
 	return staleIDs, affectedSocketIDs

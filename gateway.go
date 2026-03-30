@@ -33,7 +33,9 @@ type Gateway struct {
 	socketsMu sync.Mutex
 	sockets   map[string]*velaros.Socket
 
+	stopOnce sync.Once
 	stopChan chan struct{}
+	stopWg   sync.WaitGroup
 }
 
 var _ velaros.Handler = &Gateway{}
@@ -93,7 +95,6 @@ func (g *Gateway) Start() error {
 			serviceDescriptor.Name, len(serviceDescriptor.RouteDescriptors))
 		if err := g.gsi.SetServiceDescriptor(serviceDescriptor); err != nil {
 			gatewayIndexerDebug.Tracef("Failed to index service %s: %v", serviceDescriptor.Name, err)
-			panic(err)
 		}
 	}); err != nil {
 		gatewayDebug.Tracef("Failed to bind service announcement handler: %v", err)
@@ -138,26 +139,22 @@ func (g *Gateway) Start() error {
 	if err := g.Transport.BindSocketClosed(func(socketID string, status velaros.Status, reason string) {
 		g.socketsMu.Lock()
 		socket, ok := g.sockets[socketID]
+		if ok {
+			delete(g.sockets, socketID)
+		}
 		g.socketsMu.Unlock()
 		if !ok {
 			return
 		}
 
 		socket.Close(status, reason, velaros.ServerCloseSource)
-
-		g.socketsMu.Lock()
-		delete(g.sockets, socketID)
-		g.socketsMu.Unlock()
-
-		if err := g.Transport.ClosedSocket(socketID, status, reason); err != nil {
-			gatewayDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
-		}
 		g.gsi.UnmapSocket(socketID)
 	}); err != nil {
 		gatewayDebug.Tracef("Failed to bind closed socket handler: %v", err)
 		return err
 	}
 
+	g.stopWg.Add(3)
 	go g.announceLoop()
 	go g.pruneLoop()
 	go g.heartbeatLoop()
@@ -166,7 +163,7 @@ func (g *Gateway) Start() error {
 
 	if err := g.Transport.AnnounceGateway(&GatewayDescriptor{
 		Name:               g.Name,
-		ServiceDescriptors: g.gsi.descriptors,
+		ServiceDescriptors: g.gsi.ServiceDescriptors(),
 	}); err != nil {
 		return err
 	}
@@ -175,43 +172,34 @@ func (g *Gateway) Start() error {
 }
 
 func (g *Gateway) Stop() {
-	gatewayDebug.Tracef("Stopping gateway %s", g.Name)
+	g.stopOnce.Do(func() {
+		gatewayDebug.Tracef("Stopping gateway %s", g.Name)
 
-	if g.gsi == nil || g.gsi.IsClosed() {
-		gatewayDebug.Trace("Gateway already stopped")
-		return
-	}
+		// Signal background goroutines to stop and wait for them to exit
+		// before tearing down transport handlers.
+		close(g.stopChan)
+		g.stopWg.Wait()
 
-	close(g.stopChan)
+		gatewayDebug.Trace("Closing service indexer")
+		g.gsi.Close()
 
-	gatewayDebug.Trace("Closing service indexer")
-	g.gsi.Close()
+		gatewayDebug.Trace("Unbinding service announce handler")
+		if err := g.Transport.UnbindServiceAnnounce(); err != nil {
+			gatewayDebug.Tracef("Failed to unbind service announce: %v", err)
+		}
 
-	gatewayDebug.Trace("Unbinding service announce handler")
-	if err := g.Transport.UnbindServiceAnnounce(); err != nil {
-		gatewayDebug.Tracef("Failed to unbind service announce: %v", err)
-		panic(err)
-	}
+		gatewayDebug.Trace("Unbinding message gateway handler")
+		if err := g.Transport.UnbindMessageGateway(g.ID); err != nil {
+			gatewayDebug.Tracef("Failed to unbind message gateway: %v", err)
+		}
 
-	gatewayDebug.Trace("Unbinding message gateway handler")
-	if err := g.Transport.UnbindMessageGateway(g.ID); err != nil {
-		gatewayDebug.Tracef("Failed to unbind message gateway: %v", err)
-		panic(err)
-	}
+		gatewayDebug.Trace("Unbinding socket closed handler")
+		if err := g.Transport.UnbindSocketClosed(); err != nil {
+			gatewayDebug.Tracef("Failed to unbind socket closed: %v", err)
+		}
 
-	gatewayDebug.Trace("Unbinding socket closed handler")
-	if err := g.Transport.UnbindSocketClosed(); err != nil {
-		gatewayDebug.Tracef("Failed to unbind socket closed: %v", err)
-		panic(err)
-	}
-
-	gatewayDebug.Trace("Unbinding socket heartbeat handler")
-	if err := g.Transport.UnbindSocketHeartbeat(); err != nil {
-		gatewayDebug.Tracef("Failed to unbind socket heartbeat: %v", err)
-		panic(err)
-	}
-
-	gatewayDebug.Trace("Gateway stopped successfully")
+		gatewayDebug.Trace("Gateway stopped successfully")
+	})
 }
 
 func (g *Gateway) CanServePath(path string) bool {
@@ -277,7 +265,9 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		gatewayRouteDebug.Tracef("Mapping socket for service %s", serviceName)
 		serviceID, isNewConnection, err := g.gsi.MapSocket(serviceName, socket.ID())
 		if err != nil {
-			panic(err)
+			gatewayRouteDebug.Tracef("Failed to map socket for service %s: %v", serviceName, err)
+			g.closeSocket(socket.ID())
+			break
 		}
 		if serviceID == "" {
 			g.closeSocket(socket.ID())
@@ -299,7 +289,7 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		}
 
 		if err := g.gsi.UnsetService(serviceID); err != nil {
-			panic(err)
+			gatewayRouteDebug.Tracef("Failed to unset service %s: %v", serviceID, err)
 		}
 
 		if !isNewConnection {
@@ -315,6 +305,7 @@ func (g *Gateway) HandleClose(ctx *velaros.Context) {
 }
 
 func (g *Gateway) announceLoop() {
+	defer g.stopWg.Done()
 	ticker := time.NewTicker(g.AnnounceInterval)
 	defer ticker.Stop()
 
@@ -338,6 +329,7 @@ func (g *Gateway) announceLoop() {
 }
 
 func (g *Gateway) pruneLoop() {
+	defer g.stopWg.Done()
 	ticker := time.NewTicker(g.AnnounceInterval)
 	defer ticker.Stop()
 
@@ -358,6 +350,7 @@ func (g *Gateway) pruneLoop() {
 }
 
 func (g *Gateway) heartbeatLoop() {
+	defer g.stopWg.Done()
 	ticker := time.NewTicker(g.HeartbeatInterval)
 	defer ticker.Stop()
 
@@ -385,10 +378,17 @@ func (g *Gateway) heartbeatLoop() {
 
 func (g *Gateway) closeSocket(socketID string) {
 	g.socketsMu.Lock()
+	socket, ok := g.sockets[socketID]
 	delete(g.sockets, socketID)
 	g.socketsMu.Unlock()
 
-	if err := g.Transport.ClosedSocket(socketID, velaros.StatusGoingAway, "Socket closed by client"); err != nil {
+	if !ok {
+		return
+	}
+
+	socket.Close(velaros.StatusGoingAway, "Service unreachable", velaros.ServerCloseSource)
+
+	if err := g.Transport.ClosedSocket(socketID, velaros.StatusGoingAway, "Service unreachable"); err != nil {
 		gatewayDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
 	}
 	g.gsi.UnmapSocket(socketID)

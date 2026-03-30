@@ -3,6 +3,7 @@ package eurus
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	"github.com/RobertWHurst/velaros"
 )
@@ -20,6 +21,8 @@ type Connection struct {
 	remoteAttr  string
 	messageChan chan *velaros.SocketMessage
 
+	closeOnce   sync.Once
+	closeMu     sync.Mutex
 	closeStatus velaros.Status
 	closeReason string
 
@@ -59,10 +62,15 @@ func (c *Connection) HandleMessage(msg *velaros.SocketMessage) {
 }
 
 func (c *Connection) HandleClose(status velaros.Status, reason string) {
-	c.onClosed()
-	c.ctxCancel()
-	c.closeStatus = status
-	c.closeReason = reason
+	c.closeOnce.Do(func() {
+		c.closeMu.Lock()
+		c.closeStatus = status
+		c.closeReason = reason
+		c.closeMu.Unlock()
+
+		c.onClosed()
+		c.ctxCancel()
+	})
 }
 
 func (c *Connection) Read(socketCtx context.Context) (*velaros.SocketMessage, error) {

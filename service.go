@@ -77,7 +77,9 @@ type Service struct {
 	ClosedSocketTTL  time.Duration
 	HeartbeatTimeout time.Duration
 
+	stopOnce sync.Once
 	stopChan chan struct{}
+	stopWg   sync.WaitGroup
 }
 
 // NewService creates a new service with the given name, connection, and handler.
@@ -165,6 +167,7 @@ func (s *Service) Start() error {
 	}
 
 	serviceDebug.Trace("Starting prune loop")
+	s.stopWg.Add(1)
 	go s.pruneLoop()
 
 	serviceDebug.Trace("Announcing service to gateways")
@@ -178,47 +181,51 @@ func (s *Service) Start() error {
 }
 
 // Stop stops the service. This will unbind the service from the connection.
-// This provides a way to dispose of the service if need be.
+// This provides a way to dispose of the service if need be. It is safe to
+// call multiple times.
 func (s *Service) Stop() {
-	if s.Router == nil {
-		return
-	}
-	s.Router = nil
+	s.stopOnce.Do(func() {
+		serviceDebug.Tracef("Stopping service %s", s.Name)
 
-	serviceDebug.Tracef("Stopping service %s", s.Name)
+		// Signal the prune loop to stop first, then wait for it to exit.
+		close(s.stopChan)
+		s.stopWg.Wait()
 
-	s.closeAllConnections()
+		s.closeAllConnections()
 
-	serviceDebug.Trace("Unbinding gateway announcement handler")
-	if err := s.Transport.UnbindGatewayAnnounce(); err != nil {
-		serviceDebug.Tracef("Failed to unbind gateway announcement handler: %v", err)
-		panic(err)
-	}
+		serviceDebug.Trace("Unbinding gateway announcement handler")
+		if err := s.Transport.UnbindGatewayAnnounce(); err != nil {
+			serviceDebug.Tracef("Failed to unbind gateway announcement handler: %v", err)
+		}
 
-	serviceDebug.Trace("Unbinding dispatch handler")
-	if err := s.Transport.UnbindMessageService(s.ID); err != nil {
-		serviceDebug.Tracef("Failed to unbind dispatch handler: %v", err)
-		panic(err)
-	}
+		serviceDebug.Trace("Unbinding dispatch handler")
+		if err := s.Transport.UnbindMessageService(s.ID); err != nil {
+			serviceDebug.Tracef("Failed to unbind dispatch handler: %v", err)
+		}
 
-	serviceDebug.Trace("Unbinding socket closed handler")
-	if err := s.Transport.UnbindSocketClosed(); err != nil {
-		serviceDebug.Tracef("Failed to unbind socket closed handler: %v", err)
-		panic(err)
-	}
+		serviceDebug.Trace("Unbinding socket closed handler")
+		if err := s.Transport.UnbindSocketClosed(); err != nil {
+			serviceDebug.Tracef("Failed to unbind socket closed handler: %v", err)
+		}
 
-	serviceDebug.Trace("Unbinding socket heartbeat handler")
-	if err := s.Transport.UnbindSocketHeartbeat(); err != nil {
-		serviceDebug.Tracef("Failed to unbind socket heartbeat handler: %v", err)
-		panic(err)
-	}
+		serviceDebug.Trace("Unbinding socket heartbeat handler")
+		if err := s.Transport.UnbindSocketHeartbeat(); err != nil {
+			serviceDebug.Tracef("Failed to unbind socket heartbeat handler: %v", err)
+		}
 
-	close(s.stopChan)
-	serviceDebug.Tracef("Service %s stopped successfully", s.Name)
+		serviceDebug.Tracef("Service %s stopped successfully", s.Name)
+	})
 }
 
 func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
 	serviceAnnounceDebug.Tracef("Received gateway announcement from %s", gatewayDescriptor.Name)
+
+	// Check if stopped — don't attempt to re-announce after shutdown.
+	select {
+	case <-s.stopChan:
+		return
+	default:
+	}
 
 	isWantedGateway := len(s.GatewayNames) == 0
 	if !isWantedGateway {
@@ -245,7 +252,6 @@ func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
 		serviceAnnounceDebug.Trace("Service not found in gateway's service index, announcing service")
 		if err := s.doAnnounce(); err != nil {
 			serviceAnnounceDebug.Tracef("Failed to announce service: %v", err)
-			panic(err)
 		}
 	}
 }
@@ -354,6 +360,7 @@ func (s *Service) closeAllConnections() {
 }
 
 func (s *Service) pruneLoop() {
+	defer s.stopWg.Done()
 	ticker := time.NewTicker(s.PruneInterval)
 	defer ticker.Stop()
 
@@ -369,7 +376,6 @@ func (s *Service) pruneLoop() {
 
 func (s *Service) pruneStaleResources() {
 	s.connectionsMu.Lock()
-	defer s.connectionsMu.Unlock()
 
 	now := time.Now()
 
@@ -380,25 +386,34 @@ func (s *Service) pruneStaleResources() {
 		}
 	}
 
-	staleConnections := []string{}
+	// Collect stale connections under the lock, then release before calling
+	// HandleClose to avoid re-entrant lock issues with the onClosed callback.
+	type staleEntry struct {
+		socketID   string
+		connection *Connection
+	}
+	var stale []staleEntry
 	for socketID := range s.connections {
 		lastHB, hasHeartbeat := s.lastHeartbeat[socketID]
 		if !hasHeartbeat || now.Sub(lastHB) > s.HeartbeatTimeout {
 			serviceHandleDebug.Tracef("Connection %s has stale heartbeat, closing", socketID)
-			staleConnections = append(staleConnections, socketID)
+			stale = append(stale, staleEntry{socketID, s.connections[socketID]})
 		}
 	}
 
-	for _, socketID := range staleConnections {
-		connection, ok := s.connections[socketID]
-		delete(s.connections, socketID)
-		delete(s.lastHeartbeat, socketID)
-		s.closedSockets[socketID] = now
+	// Remove from maps while we still hold the lock.
+	for _, e := range stale {
+		delete(s.connections, e.socketID)
+		delete(s.lastHeartbeat, e.socketID)
+		s.closedSockets[e.socketID] = now
+	}
 
-		if ok {
-			s.connectionsMu.Unlock()
-			connection.HandleClose(velaros.StatusGoingAway, "No heartbeat received")
-			s.connectionsMu.Lock()
-		}
+	s.connectionsMu.Unlock()
+
+	// Now call HandleClose outside the lock — safe because HandleClose is
+	// idempotent (sync.Once) and onClosed's delete is a no-op for keys
+	// we already removed.
+	for _, e := range stale {
+		e.connection.HandleClose(velaros.StatusGoingAway, "No heartbeat received")
 	}
 }
