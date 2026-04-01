@@ -118,17 +118,7 @@ func (g *Gateway) Start() error {
 		err := socket.SendWithContext(sendCtx, msg.Type, msg.Data)
 		if err != nil {
 			gatewayRouteDebug.Tracef("Failed to route message to socket %s: %v", socketID, err)
-			gatewayRouteDebug.Tracef("Closing socket %s due to send failure", socketID)
-			socket.Close(velaros.StatusInternalError, "Failed to send message", velaros.ServerCloseSource)
-
-			g.socketsMu.Lock()
-			delete(g.sockets, socketID)
-			g.socketsMu.Unlock()
-			g.gsi.UnmapSocket(socketID)
-
-			if err := g.Transport.ClosedSocket(socketID, velaros.StatusInternalError, "Failed to send message"); err != nil {
-				gatewayRouteDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
-			}
+			g.closeSocket(socketID, velaros.StatusInternalError, "Failed to send message")
 		}
 
 	}); err != nil {
@@ -266,11 +256,11 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		serviceID, isNewConnection, err := g.gsi.MapSocket(serviceName, socket.ID())
 		if err != nil {
 			gatewayRouteDebug.Tracef("Failed to map socket for service %s: %v", serviceName, err)
-			g.closeSocket(socket.ID())
+			g.closeSocket(socket.ID(), velaros.StatusGoingAway, "Service unreachable")
 			break
 		}
 		if serviceID == "" {
-			g.closeSocket(socket.ID())
+			g.closeSocket(socket.ID(), velaros.StatusGoingAway, "Service unreachable")
 			break
 		}
 
@@ -293,7 +283,7 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 		}
 
 		if !isNewConnection {
-			g.closeSocket(socket.ID())
+			g.closeSocket(socket.ID(), velaros.StatusGoingAway, "Service unreachable")
 			break
 		}
 	}
@@ -301,7 +291,7 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 
 func (g *Gateway) HandleClose(ctx *velaros.Context) {
 	gatewayRouteDebug.Tracef("Handling close for socket %s", ctx.SocketID())
-	g.closeSocket(ctx.SocketID())
+	g.closeSocket(ctx.SocketID(), velaros.StatusGoingAway, "Client disconnected")
 }
 
 func (g *Gateway) announceLoop() {
@@ -343,7 +333,7 @@ func (g *Gateway) pruneLoop() {
 
 			for _, socketID := range affectedSocketIDs {
 				gatewayAnnounceDebug.Tracef("Closing socket %s due to stale service", socketID)
-				g.closeSocket(socketID)
+				g.closeSocket(socketID, velaros.StatusGoingAway, "Service unreachable")
 			}
 		}
 	}
@@ -359,24 +349,17 @@ func (g *Gateway) heartbeatLoop() {
 		case <-g.stopChan:
 			return
 		case <-ticker.C:
-			g.socketsMu.Lock()
-			socketIDs := make([]string, 0, len(g.sockets))
-			for socketID := range g.sockets {
-				socketIDs = append(socketIDs, socketID)
-			}
-			g.socketsMu.Unlock()
-
-			// Send heartbeat for each active socket
-			for _, socketID := range socketIDs {
-				if err := g.Transport.HeartbeatSocket(socketID); err != nil {
-					gatewayAnnounceDebug.Tracef("Error sending heartbeat for socket %s: %v", socketID, err)
+			socketsByInstance := g.gsi.SocketIDsByServiceInstance()
+			for instanceID, socketIDs := range socketsByInstance {
+				if err := g.Transport.HeartbeatSocketService(instanceID, socketIDs); err != nil {
+					gatewayAnnounceDebug.Tracef("Error sending heartbeat to service %s: %v", instanceID, err)
 				}
 			}
 		}
 	}
 }
 
-func (g *Gateway) closeSocket(socketID string) {
+func (g *Gateway) closeSocket(socketID string, status velaros.Status, reason string) {
 	g.socketsMu.Lock()
 	socket, ok := g.sockets[socketID]
 	delete(g.sockets, socketID)
@@ -386,9 +369,9 @@ func (g *Gateway) closeSocket(socketID string) {
 		return
 	}
 
-	socket.Close(velaros.StatusGoingAway, "Service unreachable", velaros.ServerCloseSource)
+	socket.Close(status, reason, velaros.ServerCloseSource)
 
-	if err := g.Transport.ClosedSocket(socketID, velaros.StatusGoingAway, "Service unreachable"); err != nil {
+	if err := g.Transport.ClosedSocket(socketID, status, reason); err != nil {
 		gatewayDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
 	}
 	g.gsi.UnmapSocket(socketID)

@@ -1,35 +1,34 @@
 package localtransport
 
-// HeartbeatSocket broadcasts that a socket is alive
-func (t *LocalTransport) HeartbeatSocket(socketID string) error {
-	transportLocalMessageDebug.Tracef("Broadcasting heartbeat for socket: %s", socketID)
+// HeartbeatSocketService sends a batched heartbeat to a specific service instance
+func (t *LocalTransport) HeartbeatSocketService(serviceID string, socketIDs []string) error {
+	transportLocalMessageDebug.Tracef("Sending batched heartbeat to service %s with %d sockets", serviceID, len(socketIDs))
 
 	t.mu.RLock()
-	handlers := make([]func(socketID string), len(t.socketHeartbeatHandlers))
-	copy(handlers, t.socketHeartbeatHandlers)
+	handler, ok := t.socketHeartbeatServiceHandlers[serviceID]
 	t.mu.RUnlock()
 
-	for _, handler := range handlers {
-		handler(socketID)
+	if ok {
+		handler(socketIDs)
 	}
 
 	return nil
 }
 
-// BindSocketHeartbeat binds handler for socket heartbeat events
-func (t *LocalTransport) BindSocketHeartbeat(handler func(socketID string)) error {
-	transportLocalMessageDebug.Trace("Binding socket heartbeat handler")
+// BindSocketHeartbeatService binds handler for batched socket heartbeat events targeted at a service
+func (t *LocalTransport) BindSocketHeartbeatService(serviceID string, handler func(socketIDs []string)) error {
+	transportLocalMessageDebug.Tracef("Binding socket heartbeat handler for service %s", serviceID)
 	t.mu.Lock()
-	t.socketHeartbeatHandlers = append(t.socketHeartbeatHandlers, handler)
+	t.socketHeartbeatServiceHandlers[serviceID] = handler
 	t.mu.Unlock()
 	return nil
 }
 
-// UnbindSocketHeartbeat unbinds the socket heartbeat handler
-func (t *LocalTransport) UnbindSocketHeartbeat() error {
-	transportLocalMessageDebug.Trace("Unbinding socket heartbeat handler")
+// UnbindSocketHeartbeatService unbinds the socket heartbeat handler for a service
+func (t *LocalTransport) UnbindSocketHeartbeatService(serviceID string) error {
+	transportLocalMessageDebug.Tracef("Unbinding socket heartbeat handler for service %s", serviceID)
 	t.mu.Lock()
-	t.socketHeartbeatHandlers = nil
+	delete(t.socketHeartbeatServiceHandlers, serviceID)
 	t.mu.Unlock()
 	return nil
 }

@@ -825,15 +825,35 @@ func TestGateway_Stop_UnbindsAllHandlers(t *testing.T) {
 func TestGateway_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	transport := localtransport.New()
 
-	heartbeatsSent := 0
-	err := transport.BindSocketHeartbeat(func(socketID string) {
-		heartbeatsSent++
-	})
-	require.NoError(t, err)
-
 	gateway := eurus.NewGateway("test-gateway", transport)
 	gateway.HeartbeatInterval = 50 * time.Millisecond
-	err = gateway.Start()
+	err := gateway.Start()
+	require.NoError(t, err)
+
+	// Create a service so heartbeats have something to target
+	router := velaros.NewRouter()
+	service := eurus.NewService("test-service", transport, router)
+	route, _ := eurus.NewRouteDescriptor("/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Create a socket mapping so heartbeats are sent
+	connInfo := &velaros.ConnectionInfo{}
+	msg := &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	}
+	err = transport.MessageService(service.ID, gateway.ID, "heartbeat-test-socket", connInfo, msg)
+	require.NoError(t, err)
+
+	heartbeatsSent := 0
+	err = transport.BindSocketHeartbeatService(service.ID, func(socketIDs []string) {
+		heartbeatsSent += len(socketIDs)
+	})
 	require.NoError(t, err)
 
 	time.Sleep(120 * time.Millisecond)
@@ -867,10 +887,10 @@ func TestGateway_ProtectedMapDeletion_NoRace(t *testing.T) {
 		done <- true
 	}()
 
-	// Concurrent heartbeats
+	// Concurrent heartbeats (targeted at a dummy service)
 	go func() {
 		for i := 0; i < 50; i++ {
-			transport.HeartbeatSocket("socket-race")
+			transport.HeartbeatSocketService("dummy-service", []string{"socket-race"})
 			time.Sleep(2 * time.Millisecond)
 		}
 		done <- true

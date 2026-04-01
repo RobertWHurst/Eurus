@@ -139,9 +139,19 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 		t.messageHandlerWg.Add(1)
 		go func() {
 			defer t.messageHandlerWg.Done()
-			if err := t.handleGatewayMessage(msg, handler); err != nil {
-				transportNatsMessageDebug.Tracef("Error handling gateway message: %v", err)
+
+			assembled, header, err := func() ([]byte, *GatewayMessageHeader, error) {
+				t.messageParserSem <- struct{}{}
+				defer func() { <-t.messageParserSem }()
+				return t.parseGatewayMessage(msg)
+			}()
+
+			if err != nil {
+				transportNatsMessageDebug.Tracef("Error parsing gateway message: %v", err)
+				return
 			}
+
+			t.handleGatewayMessage(assembled, header, handler)
 		}()
 	})
 
@@ -159,11 +169,11 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	return nil
 }
 
-func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketID string, msg *velaros.SocketMessage)) error {
+func (t *NatsTransport) parseGatewayMessage(msg *nats.Msg) ([]byte, *GatewayMessageHeader, error) {
 	header := &GatewayMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
@@ -172,7 +182,7 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 	chunkSub, err := t.NatsConnection.SubscribeSync(chunkSubject)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to subscribe to chunks: %v", err)
-		return err
+		return nil, nil, err
 	}
 	defer chunkSub.Unsubscribe()
 
@@ -182,13 +192,13 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 	ackBytes, err := msgpack.Marshal(ack)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to marshal ack: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	transportNatsMessageDebug.Tracef("Sending ack with chunk subject: %s", chunkSubject)
 	if err := t.NatsConnection.Publish(msg.Reply, ackBytes); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to send ack: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	var assembled []byte
@@ -196,12 +206,12 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 		chunkMsg, err := chunkSub.NextMsg(MessageTimeout)
 		if err != nil {
 			transportNatsMessageDebug.Tracef("Error receiving chunk: %v", err)
-			return err
+			return nil, nil, err
 		}
 		chunk := &MessageChunk{}
 		if err := msgpack.Unmarshal(chunkMsg.Data, chunk); err != nil {
 			transportNatsMessageDebug.Tracef("Failed to unmarshal chunk: %v", err)
-			return err
+			return nil, nil, err
 		}
 
 		chunkAck := &MessageChunkAck{
@@ -211,11 +221,11 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 		chunkAckBytes, err := msgpack.Marshal(chunkAck)
 		if err != nil {
 			transportNatsMessageDebug.Tracef("Failed to marshal chunk ack: %v", err)
-			return err
+			return nil, nil, err
 		}
 		if err := t.NatsConnection.Publish(chunkMsg.Reply, chunkAckBytes); err != nil {
 			transportNatsMessageDebug.Tracef("Failed to send chunk ack: %v", err)
-			return err
+			return nil, nil, err
 		}
 
 		transportNatsMessageDebug.Tracef("Received chunk %d (%d bytes, EOF: %v)", chunk.Index, len(chunk.Data), chunk.IsEOF)
@@ -223,15 +233,19 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 		assembled = append(assembled, chunk.Data...)
 
 		if chunk.IsEOF {
-			transportNatsMessageDebug.Tracef("Received EOF, delivering assembled message (%d bytes)", len(assembled))
+			transportNatsMessageDebug.Tracef("Received EOF, parsed message (%d bytes)", len(assembled))
 			break
 		}
 	}
 
+	return assembled, header, nil
+}
+
+func (t *NatsTransport) handleGatewayMessage(assembled []byte, header *GatewayMessageHeader, handler func(socketID string, msg *velaros.SocketMessage)) {
 	payload := &GatewayMessagePayload{}
 	if err := msgpack.Unmarshal(assembled, payload); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal payload: %v", err)
-		return err
+		return
 	}
 
 	handler(header.SocketID, &velaros.SocketMessage{
@@ -242,7 +256,6 @@ func (t *NatsTransport) handleGatewayMessage(msg *nats.Msg, handler func(socketI
 	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
-	return nil
 }
 
 // UnbindMessageGateway unbinds the message handler for a gateway

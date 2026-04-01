@@ -157,9 +157,12 @@ func (s *Service) Start() error {
 	}
 
 	serviceDebug.Trace("Binding socket heartbeat handler")
-	if err := s.Transport.BindSocketHeartbeat(func(socketID string) {
+	if err := s.Transport.BindSocketHeartbeatService(s.ID, func(socketIDs []string) {
 		s.connectionsMu.Lock()
-		s.lastHeartbeat[socketID] = time.Now()
+		now := time.Now()
+		for _, socketID := range socketIDs {
+			s.lastHeartbeat[socketID] = now
+		}
 		s.connectionsMu.Unlock()
 	}); err != nil {
 		serviceDebug.Tracef("Failed to bind socket heartbeat handler: %v", err)
@@ -209,7 +212,7 @@ func (s *Service) Stop() {
 		}
 
 		serviceDebug.Trace("Unbinding socket heartbeat handler")
-		if err := s.Transport.UnbindSocketHeartbeat(); err != nil {
+		if err := s.Transport.UnbindSocketHeartbeatService(s.ID); err != nil {
 			serviceDebug.Tracef("Failed to unbind socket heartbeat handler: %v", err)
 		}
 

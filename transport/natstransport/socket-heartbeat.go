@@ -11,17 +11,17 @@ var (
 )
 
 type SocketHeartbeatEnvelope struct {
-	SocketID string `msgpack:"socketID"`
+	SocketIDs []string `msgpack:"socketIDs"`
 }
 
-// HeartbeatSocket broadcasts that a socket is alive
-func (t *NatsTransport) HeartbeatSocket(socketID string) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Broadcasting heartbeat for socket: %s", socketID)
+// HeartbeatSocketService sends a batched heartbeat to a specific service instance
+func (t *NatsTransport) HeartbeatSocketService(serviceID string, socketIDs []string) error {
+	transportNatsSocketHeartbeatDebug.Tracef("Sending batched heartbeat to service %s with %d sockets", serviceID, len(socketIDs))
 
-	subject := namespace("socket", "heartbeat")
+	subject := namespace("service", serviceID, "socket-heartbeat")
 
 	envelope := &SocketHeartbeatEnvelope{
-		SocketID: socketID,
+		SocketIDs: socketIDs,
 	}
 
 	envelopeBytes, err := msgpack.Marshal(envelope)
@@ -38,11 +38,11 @@ func (t *NatsTransport) HeartbeatSocket(socketID string) error {
 	return nil
 }
 
-// BindSocketHeartbeat binds handler for socket heartbeat events
-func (t *NatsTransport) BindSocketHeartbeat(handler func(socketID string)) error {
-	transportNatsSocketHeartbeatDebug.Trace("Binding socket heartbeat handler")
+// BindSocketHeartbeatService binds handler for batched socket heartbeat events targeted at a service
+func (t *NatsTransport) BindSocketHeartbeatService(serviceID string, handler func(socketIDs []string)) error {
+	transportNatsSocketHeartbeatDebug.Tracef("Binding socket heartbeat handler for service %s", serviceID)
 
-	subject := namespace("socket", "heartbeat")
+	subject := namespace("service", serviceID, "socket-heartbeat")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
 		envelope := &SocketHeartbeatEnvelope{}
@@ -51,7 +51,7 @@ func (t *NatsTransport) BindSocketHeartbeat(handler func(socketID string)) error
 			return
 		}
 
-		handler(envelope.SocketID)
+		handler(envelope.SocketIDs)
 	})
 
 	if err != nil {
@@ -59,19 +59,22 @@ func (t *NatsTransport) BindSocketHeartbeat(handler func(socketID string)) error
 		return err
 	}
 
-	t.unbindSocketHeartbeat = func() error {
-		transportNatsSocketHeartbeatDebug.Trace("Unbinding socket heartbeat handler")
+	t.unbindSocketHeartbeatService[serviceID] = func() error {
+		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for service %s", serviceID)
 		return sub.Unsubscribe()
 	}
 
-	transportNatsSocketHeartbeatDebug.Trace("Socket heartbeat handler bound successfully")
+	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for service %s", serviceID)
 	return nil
 }
 
-// UnbindSocketHeartbeat unbinds the socket heartbeat handler
-func (t *NatsTransport) UnbindSocketHeartbeat() error {
-	if t.unbindSocketHeartbeat != nil {
-		return t.unbindSocketHeartbeat()
+// UnbindSocketHeartbeatService unbinds the socket heartbeat handler for a service
+func (t *NatsTransport) UnbindSocketHeartbeatService(serviceID string) error {
+	if unbind, ok := t.unbindSocketHeartbeatService[serviceID]; ok {
+		if err := unbind(); err != nil {
+			return err
+		}
+		delete(t.unbindSocketHeartbeatService, serviceID)
 	}
 	return nil
 }

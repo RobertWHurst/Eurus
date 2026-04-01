@@ -142,8 +142,8 @@ func TestHeartbeat_UpdatesTimestamp(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Send heartbeat
-	err = transport.HeartbeatSocket(socketID)
+	// Send batched heartbeat targeted at service
+	err = transport.HeartbeatSocketService(service.ID, []string{socketID})
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -187,27 +187,43 @@ func TestHeartbeat_PrunesStaleConnections(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestGatewayHeartbeat_SendsForAllSockets tests that the gateway sends
-// heartbeats for all active sockets
-func TestGatewayHeartbeat_SendsForAllSockets(t *testing.T) {
+// TestGatewayHeartbeat_SendsBatchedHeartbeats tests that the gateway sends
+// batched heartbeats targeted at service instances
+func TestGatewayHeartbeat_SendsBatchedHeartbeats(t *testing.T) {
 	transport := localtransport.New()
-
-	heartbeatCount := 0
-	err := transport.BindSocketHeartbeat(func(socketID string) {
-		heartbeatCount++
-	})
-	require.NoError(t, err)
 
 	gateway := eurus.NewGateway("test-gateway", transport)
 	gateway.HeartbeatInterval = 100 * time.Millisecond
-	err = gateway.Start()
+	err := gateway.Start()
 	require.NoError(t, err)
 	defer gateway.Stop()
+
+	// Create a service and register it
+	router := velaros.NewRouter()
+	service := eurus.NewService("test-service", transport, router)
+	route, _ := eurus.NewRouteDescriptor("/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err = service.Start()
+	require.NoError(t, err)
+	defer service.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send a message to create a socket mapping
+	connInfo := &velaros.ConnectionInfo{}
+	msg := &velaros.SocketMessage{
+		Type: websocket.MessageText,
+		Data: []byte("test"),
+	}
+	err = transport.MessageService(service.ID, gateway.ID, "socket-1", connInfo, msg)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
 
 	// Wait for at least one heartbeat cycle
 	time.Sleep(200 * time.Millisecond)
 
-	// Gateway heartbeat loop should have run
+	// Gateway heartbeat loop should have run (verified by no panics/errors)
 }
 
 // TestMultipleClosures_NoDoubleCleanup tests that closing a connection multiple

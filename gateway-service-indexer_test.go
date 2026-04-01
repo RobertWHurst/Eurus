@@ -516,6 +516,49 @@ func TestGatewayServiceIndexer_PruneStaleServices_ReturnsAffectedSocketIDs(t *te
 	assert.Contains(t, affectedSocketIDs, "socket-2")
 }
 
+func TestGatewayServiceIndexer_SocketIDsByServiceInstance_GroupsByInstance(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	route1, _ := NewRouteDescriptor("/api/users")
+	route2, _ := NewRouteDescriptor("/api/posts")
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "user-service",
+		ID:               "instance-1",
+		RouteDescriptors: []*RouteDescriptor{route1},
+	})
+	indexer.SetServiceDescriptor(&ServiceDescriptor{
+		Name:             "post-service",
+		ID:               "instance-2",
+		RouteDescriptors: []*RouteDescriptor{route2},
+	})
+
+	indexer.MapSocket("user-service", "socket-1")
+	indexer.MapSocket("user-service", "socket-2")
+	indexer.MapSocket("post-service", "socket-1")
+	indexer.MapSocket("post-service", "socket-3")
+
+	result := indexer.SocketIDsByServiceInstance()
+
+	assert.Len(t, result, 2)
+	assert.ElementsMatch(t, []string{"socket-1", "socket-2"}, result["instance-1"])
+	assert.ElementsMatch(t, []string{"socket-1", "socket-3"}, result["instance-2"])
+}
+
+func TestGatewayServiceIndexer_SocketIDsByServiceInstance_ReturnsNilWhenClosed(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+	indexer.Close()
+
+	result := indexer.SocketIDsByServiceInstance()
+	assert.Nil(t, result)
+}
+
+func TestGatewayServiceIndexer_SocketIDsByServiceInstance_EmptyWhenNoMappings(t *testing.T) {
+	indexer := NewGatewayServiceIndexer()
+
+	result := indexer.SocketIDsByServiceInstance()
+	assert.Len(t, result, 0)
+}
+
 func TestGatewayServiceIndexer_PruneStaleServices_SafeWhenClosed(t *testing.T) {
 	indexer := NewGatewayServiceIndexer()
 	indexer.Close()

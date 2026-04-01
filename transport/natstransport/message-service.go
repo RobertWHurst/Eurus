@@ -147,9 +147,19 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		t.messageHandlerWg.Add(1)
 		go func() {
 			defer t.messageHandlerWg.Done()
-			if err := t.handleServiceMessage(msg, handler); err != nil {
-				transportNatsMessageDebug.Tracef("Error handling service message: %v", err)
+
+			assembled, header, err := func() ([]byte, *ServiceMessageHeader, error) {
+				t.messageParserSem <- struct{}{}
+				defer func() { <-t.messageParserSem }()
+				return t.parseServiceMessage(msg)
+			}()
+
+			if err != nil {
+				transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
+				return
 			}
+
+			t.handleServiceMessage(assembled, header, handler)
 		}()
 	})
 
@@ -167,11 +177,11 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	return nil
 }
 
-func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error {
+func (t *NatsTransport) parseServiceMessage(msg *nats.Msg) ([]byte, *ServiceMessageHeader, error) {
 	header := &ServiceMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
@@ -180,7 +190,7 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 	chunkSub, err := t.NatsConnection.SubscribeSync(chunkSubject)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to subscribe to chunks: %v", err)
-		return err
+		return nil, nil, err
 	}
 	defer chunkSub.Unsubscribe()
 
@@ -190,13 +200,13 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 	ackBytes, err := msgpack.Marshal(ack)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to marshal ack: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	transportNatsMessageDebug.Tracef("Sending ack with chunk subject: %s", chunkSubject)
 	if err := t.NatsConnection.Publish(msg.Reply, ackBytes); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to send ack: %v", err)
-		return err
+		return nil, nil, err
 	}
 
 	var assembled []byte
@@ -204,12 +214,12 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 		chunkMsg, err := chunkSub.NextMsg(MessageTimeout)
 		if err != nil {
 			transportNatsMessageDebug.Tracef("Error receiving chunk: %v", err)
-			return err
+			return nil, nil, err
 		}
 		chunk := &MessageChunk{}
 		if err := msgpack.Unmarshal(chunkMsg.Data, chunk); err != nil {
 			transportNatsMessageDebug.Tracef("Failed to unmarshal chunk: %v", err)
-			return err
+			return nil, nil, err
 		}
 
 		chunkAck := &MessageChunkAck{
@@ -219,11 +229,11 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 		chunkAckBytes, err := msgpack.Marshal(chunkAck)
 		if err != nil {
 			transportNatsMessageDebug.Tracef("Failed to marshal chunk ack: %v", err)
-			return err
+			return nil, nil, err
 		}
 		if err := t.NatsConnection.Publish(chunkMsg.Reply, chunkAckBytes); err != nil {
 			transportNatsMessageDebug.Tracef("Failed to send chunk ack: %v", err)
-			return err
+			return nil, nil, err
 		}
 
 		transportNatsMessageDebug.Tracef("Received chunk %d (%d bytes, EOF: %v)", chunk.Index, len(chunk.Data), chunk.IsEOF)
@@ -231,15 +241,19 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 		assembled = append(assembled, chunk.Data...)
 
 		if chunk.IsEOF {
-			transportNatsMessageDebug.Tracef("Received EOF, delivering assembled message (%d bytes)", len(assembled))
+			transportNatsMessageDebug.Tracef("Received EOF, parsed message (%d bytes)", len(assembled))
 			break
 		}
 	}
 
+	return assembled, header, nil
+}
+
+func (t *NatsTransport) handleServiceMessage(assembled []byte, header *ServiceMessageHeader, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) {
 	payload := &ServiceMessagePayload{}
 	if err := msgpack.Unmarshal(assembled, payload); err != nil {
 		transportNatsMessageDebug.Tracef("Failed to unmarshal payload: %v", err)
-		return err
+		return
 	}
 
 	connInfo := &velaros.ConnectionInfo{
@@ -254,7 +268,6 @@ func (t *NatsTransport) handleServiceMessage(msg *nats.Msg, handler func(gateway
 	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
-	return nil
 }
 
 // UnbindMessageService unbinds the message handler for a service

@@ -244,6 +244,23 @@ func (r *GatewayServiceIndexer) MapSocket(serviceName, socketID string) (string,
 	return targetInstance.ID, true, nil
 }
 
+func (r *GatewayServiceIndexer) SocketIDsByServiceInstance() map[string][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.closed {
+		return nil
+	}
+
+	result := make(map[string][]string)
+	for socketID, services := range r.socketToInstance {
+		for _, instanceID := range services {
+			result[instanceID] = append(result[instanceID], socketID)
+		}
+	}
+	return result
+}
+
 func (r *GatewayServiceIndexer) UnmapSocket(socketID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
