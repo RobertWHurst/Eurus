@@ -10,15 +10,15 @@ import (
 const DefaultMaxConcurrentHandlers = 256
 
 type NatsTransport struct {
-	NatsConnection               *nats.Conn
-	unbindServiceAnnounce        func() error
-	unbindGatewayAnnounce        func() error
-	unbindMessageService         map[string]func() error
-	unbindMessageGateway         map[string]func() error
-	unbindSocketClosed           func() error
-	unbindSocketHeartbeatService map[string]func() error
-	messageHandlerWg             sync.WaitGroup
-	messageParserSem                   chan struct{}
+	NatsConnection        *nats.Conn
+	unbindServiceAnnounce func() error
+	unbindGatewayAnnounce func() error
+	unbindMessageService  map[string]func() error
+	unbindMessageGateway  map[string]func() error
+	unbindSocketClosed    func() error
+	unbindSocketHeartbeat map[string]func() error
+	messageHandlerWg      sync.WaitGroup
+	messageParserSem      chan struct{}
 }
 
 var _ eurus.Transport = &NatsTransport{}
@@ -32,10 +32,10 @@ func NewWithMaxConcurrency(natsConnection *nats.Conn, maxConcurrent int) *NatsTr
 		maxConcurrent = DefaultMaxConcurrentHandlers
 	}
 	return &NatsTransport{
-		NatsConnection:               natsConnection,
-		unbindMessageService:         map[string]func() error{},
-		unbindMessageGateway:         map[string]func() error{},
-		unbindSocketHeartbeatService: map[string]func() error{},
-		messageParserSem:                   make(chan struct{}, maxConcurrent),
+		NatsConnection:        natsConnection,
+		unbindMessageService:  map[string]func() error{},
+		unbindMessageGateway:  map[string]func() error{},
+		unbindSocketHeartbeat: map[string]func() error{},
+		messageParserSem:      make(chan struct{}, maxConcurrent),
 	}
 }

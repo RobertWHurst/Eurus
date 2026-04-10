@@ -25,7 +25,7 @@ type Transport interface {
 	BindSocketClosed(handler func(socketID string, status velaros.Status, reason string)) error
 	UnbindSocketClosed() error
 
-	HeartbeatSocketService(serviceID string, socketIDs []string) error
-	BindSocketHeartbeatService(serviceID string, handler func(socketIDs []string)) error
-	UnbindSocketHeartbeatService(serviceID string) error
+	HeartbeatSocket(gatewayID string, serviceID string, socketID string) error
+	BindSocketHeartbeat(gatewayID string, handler func(serviceID string, socketID string) bool) error
+	UnbindSocketHeartbeat(gatewayID string) error
 }

@@ -119,88 +119,19 @@ func TestClosedSocketTracking_PrunesOldRecords(t *testing.T) {
 	// Record should be pruned now
 }
 
-// TestHeartbeat_UpdatesTimestamp tests that heartbeats update the last heartbeat timestamp
-func TestHeartbeat_UpdatesTimestamp(t *testing.T) {
-	transport := localtransport.New()
-
-	router := velaros.NewRouter()
-	service := eurus.NewService("test-service", transport, router)
-	err := service.Start()
-	require.NoError(t, err)
-	defer service.Stop()
-
-	socketID := "test-socket-heartbeat"
-
-	// Create connection by sending a message
-	connInfo := &velaros.ConnectionInfo{}
-	msg := &velaros.SocketMessage{
-		Type: websocket.MessageText,
-		Data: []byte("test"),
-	}
-	err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
-	require.NoError(t, err)
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Send batched heartbeat targeted at service
-	err = transport.HeartbeatSocketService(service.ID, []string{socketID})
-	require.NoError(t, err)
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Heartbeat should have been processed (verified by no errors)
-}
-
-// TestHeartbeat_PrunesStaleConnections tests that connections without heartbeats
-// are removed from the connection map
-func TestHeartbeat_PrunesStaleConnections(t *testing.T) {
-	transport := localtransport.New()
-
-	router := velaros.NewRouter()
-	service := eurus.NewService("test-service", transport, router)
-	service.HeartbeatTimeout = 300 * time.Millisecond
-	service.PruneInterval = 100 * time.Millisecond
-	err := service.Start()
-	require.NoError(t, err)
-	defer service.Stop()
-
-	time.Sleep(50 * time.Millisecond)
-
-	socketID := "test-socket-stale"
-
-	// Create connection
-	connInfo := &velaros.ConnectionInfo{}
-	msg := &velaros.SocketMessage{
-		Type: websocket.MessageText,
-		Data: []byte("test"),
-	}
-	err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
-	require.NoError(t, err)
-
-	time.Sleep(50 * time.Millisecond)
-
-	// Don't send heartbeats - wait for timeout and prune
-	time.Sleep(500 * time.Millisecond)
-
-	// Try sending message - should be dropped since connection was pruned and marked closed
-	err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
-	require.NoError(t, err)
-}
-
-// TestGatewayHeartbeat_SendsBatchedHeartbeats tests that the gateway sends
-// batched heartbeats targeted at service instances
-func TestGatewayHeartbeat_SendsBatchedHeartbeats(t *testing.T) {
+// TestServiceHeartbeat_ClosesDeadSockets tests that the service sends heartbeats
+// and the gateway closes sockets it no longer holds
+func TestServiceHeartbeat_ClosesDeadSockets(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	gateway.HeartbeatInterval = 100 * time.Millisecond
 	err := gateway.Start()
 	require.NoError(t, err)
 	defer gateway.Stop()
 
-	// Create a service and register it
 	router := velaros.NewRouter()
 	service := eurus.NewService("test-service", transport, router)
+	service.HeartbeatInterval = 100 * time.Millisecond
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
 	err = service.Start()
@@ -209,21 +140,30 @@ func TestGatewayHeartbeat_SendsBatchedHeartbeats(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Send a message to create a socket mapping
+	socketID := "test-socket-heartbeat-dead"
 	connInfo := &velaros.ConnectionInfo{}
 	msg := &velaros.SocketMessage{
 		Type: websocket.MessageText,
 		Data: []byte("test"),
 	}
-	err = transport.MessageService(service.ID, gateway.ID, "socket-1", connInfo, msg)
+
+	// Create a connection on the service side via a message from the gateway
+	err = transport.MessageService(service.ID, gateway.ID, socketID, connInfo, msg)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Wait for at least one heartbeat cycle
+	// The gateway never had this socket in its sockets map (it was injected directly),
+	// so the next heartbeat from the service should trigger a ClosedSocket response.
+	// Wait for at least one heartbeat cycle.
 	time.Sleep(200 * time.Millisecond)
 
-	// Gateway heartbeat loop should have run (verified by no panics/errors)
+	// After the gateway responded with ClosedSocket, a new message should be dropped
+	// (socket is in closedSockets and connection was removed).
+	err = transport.MessageService(service.ID, gateway.ID, socketID, connInfo, msg)
+	require.NoError(t, err)
+
+	time.Sleep(50 * time.Millisecond)
 }
 
 // TestMultipleClosures_NoDoubleCleanup tests that closing a connection multiple
@@ -314,6 +254,7 @@ func TestRaceCondition_MessageBeforeClose(t *testing.T) {
 
 	assert.Equal(t, initialCount, processedMessages, "Late message after close should be dropped")
 }
+
 // TestConnection_ConcurrentHandleMessageAndClose tests concurrent message
 // sending and connection closing
 func TestConnection_ConcurrentHandleMessageAndClose(t *testing.T) {
@@ -390,11 +331,11 @@ func TestService_HighConnectionChurn(t *testing.T) {
 	// Rapid connect/disconnect cycles
 	for i := 0; i < 100; i++ {
 		socketID := fmt.Sprintf("socket-%d", i)
-		
+
 		// Create connection
 		err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
 		require.NoError(t, err)
-		
+
 		// Close immediately
 		err = transport.ClosedSocket(socketID, websocket.StatusNormalClosure, "churn")
 		require.NoError(t, err)

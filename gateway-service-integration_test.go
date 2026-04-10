@@ -2,6 +2,7 @@ package eurus_test
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -820,28 +821,27 @@ func TestGateway_Stop_UnbindsAllHandlers(t *testing.T) {
 	assert.Error(t, err, "MessageGateway should error after gateway stops")
 }
 
-// TestGateway_HeartbeatLoop_StopsCleanly tests that heartbeat loop exits
-// when gateway stops
-func TestGateway_HeartbeatLoop_StopsCleanly(t *testing.T) {
+// TestService_HeartbeatLoop_StopsCleanly tests that the service heartbeat loop exits
+// when the service stops
+func TestService_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	gateway.HeartbeatInterval = 50 * time.Millisecond
 	err := gateway.Start()
 	require.NoError(t, err)
+	defer gateway.Stop()
 
-	// Create a service so heartbeats have something to target
 	router := velaros.NewRouter()
 	service := eurus.NewService("test-service", transport, router)
+	service.HeartbeatInterval = 50 * time.Millisecond
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
 	err = service.Start()
 	require.NoError(t, err)
-	defer service.Stop()
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Create a socket mapping so heartbeats are sent
+	// Create a connection on the service side
 	connInfo := &velaros.ConnectionInfo{}
 	msg := &velaros.SocketMessage{
 		Type: websocket.MessageText,
@@ -850,20 +850,21 @@ func TestGateway_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	err = transport.MessageService(service.ID, gateway.ID, "heartbeat-test-socket", connInfo, msg)
 	require.NoError(t, err)
 
-	heartbeatsSent := 0
-	err = transport.BindSocketHeartbeatService(service.ID, func(socketIDs []string) {
-		heartbeatsSent += len(socketIDs)
+	var heartbeatsReceived atomic.Int64
+	err = transport.BindSocketHeartbeat(gateway.ID, func(serviceID string, socketID string) bool {
+		heartbeatsReceived.Add(1)
+		return true
 	})
 	require.NoError(t, err)
 
 	time.Sleep(120 * time.Millisecond)
-	countBeforeStop := heartbeatsSent
+	countBeforeStop := heartbeatsReceived.Load()
 
-	gateway.Stop()
+	service.Stop()
 	time.Sleep(120 * time.Millisecond)
 
-	// No new heartbeats should be sent
-	assert.Equal(t, countBeforeStop, heartbeatsSent, "Heartbeat loop should stop")
+	// No new heartbeats should be sent after service stops
+	assert.Equal(t, countBeforeStop, heartbeatsReceived.Load(), "Heartbeat loop should stop when service stops")
 }
 
 // TestGateway_ProtectedMapDeletion_NoRace tests that concurrent socket
@@ -887,10 +888,10 @@ func TestGateway_ProtectedMapDeletion_NoRace(t *testing.T) {
 		done <- true
 	}()
 
-	// Concurrent heartbeats (targeted at a dummy service)
+	// Concurrent heartbeats (from a dummy service to the gateway)
 	go func() {
 		for i := 0; i < 50; i++ {
-			transport.HeartbeatSocketService("dummy-service", []string{"socket-race"})
+			transport.HeartbeatSocket(gateway.ID, "dummy-service", "socket-race")
 			time.Sleep(2 * time.Millisecond)
 		}
 		done <- true
@@ -923,10 +924,10 @@ func TestService_HighConnectionChurn_BoundedMemory(t *testing.T) {
 	// High churn - 200 rapid connect/disconnect cycles
 	for i := 0; i < 200; i++ {
 		socketID := fmt.Sprintf("churn-socket-%d", i)
-		
+
 		err = transport.MessageService(service.ID, "gateway-1", socketID, connInfo, msg)
 		require.NoError(t, err)
-		
+
 		err = transport.ClosedSocket(socketID, websocket.StatusNormalClosure, "churn")
 		require.NoError(t, err)
 	}

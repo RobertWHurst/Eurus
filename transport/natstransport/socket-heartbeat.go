@@ -1,6 +1,9 @@
 package natstransport
 
 import (
+	"fmt"
+	"time"
+
 	"github.com/nats-io/nats.go"
 	"github.com/telemetryos/go-debug/debug"
 	"github.com/vmihailenco/msgpack/v5"
@@ -10,18 +13,28 @@ var (
 	transportNatsSocketHeartbeatDebug = debug.Bind("eurus:transport:nats:socket-heartbeat")
 )
 
+const heartbeatRequestTimeout = 5 * time.Second
+
 type SocketHeartbeatEnvelope struct {
-	SocketIDs []string `msgpack:"socketIDs"`
+	ServiceID string `msgpack:"serviceID"`
+	SocketID  string `msgpack:"socketID"`
 }
 
-// HeartbeatSocketService sends a batched heartbeat to a specific service instance
-func (t *NatsTransport) HeartbeatSocketService(serviceID string, socketIDs []string) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Sending batched heartbeat to service %s with %d sockets", serviceID, len(socketIDs))
+type SocketHeartbeatReply struct {
+	Alive bool `msgpack:"alive"`
+}
 
-	subject := namespace("service", serviceID, "socket-heartbeat")
+// HeartbeatSocket sends a heartbeat request from a service to a gateway for the given socket.
+// Returns nil if the gateway confirms the socket is alive, or an error if the socket
+// is not found, the gateway is unavailable, or the request times out.
+func (t *NatsTransport) HeartbeatSocket(gatewayID string, serviceID string, socketID string) error {
+	transportNatsSocketHeartbeatDebug.Tracef("Sending socket heartbeat from service %s to gateway %s for socket %s", serviceID, gatewayID, socketID)
+
+	subject := namespace("gateway", gatewayID, "socket-heartbeat")
 
 	envelope := &SocketHeartbeatEnvelope{
-		SocketIDs: socketIDs,
+		ServiceID: serviceID,
+		SocketID:  socketID,
 	}
 
 	envelopeBytes, err := msgpack.Marshal(envelope)
@@ -30,19 +43,31 @@ func (t *NatsTransport) HeartbeatSocketService(serviceID string, socketIDs []str
 		return err
 	}
 
-	if err := t.NatsConnection.Publish(subject, envelopeBytes); err != nil {
-		transportNatsSocketHeartbeatDebug.Tracef("Failed to publish: %v", err)
+	replyMsg, err := t.NatsConnection.Request(subject, envelopeBytes, heartbeatRequestTimeout)
+	if err != nil {
+		transportNatsSocketHeartbeatDebug.Tracef("Heartbeat request failed for socket %s: %v", socketID, err)
 		return err
+	}
+
+	reply := &SocketHeartbeatReply{}
+	if err := msgpack.Unmarshal(replyMsg.Data, reply); err != nil {
+		transportNatsSocketHeartbeatDebug.Tracef("Failed to unmarshal reply: %v", err)
+		return err
+	}
+
+	if !reply.Alive {
+		return fmt.Errorf("socket %s not found in gateway %s", socketID, gatewayID)
 	}
 
 	return nil
 }
 
-// BindSocketHeartbeatService binds handler for batched socket heartbeat events targeted at a service
-func (t *NatsTransport) BindSocketHeartbeatService(serviceID string, handler func(socketIDs []string)) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Binding socket heartbeat handler for service %s", serviceID)
+// BindSocketHeartbeat subscribes to heartbeat requests for a gateway.
+// The handler should return true if the socket is alive, false if it is not.
+func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(serviceID string, socketID string) bool) error {
+	transportNatsSocketHeartbeatDebug.Tracef("Binding socket heartbeat handler for gateway %s", gatewayID)
 
-	subject := namespace("service", serviceID, "socket-heartbeat")
+	subject := namespace("gateway", gatewayID, "socket-heartbeat")
 
 	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
 		envelope := &SocketHeartbeatEnvelope{}
@@ -51,7 +76,17 @@ func (t *NatsTransport) BindSocketHeartbeatService(serviceID string, handler fun
 			return
 		}
 
-		handler(envelope.SocketIDs)
+		alive := handler(envelope.ServiceID, envelope.SocketID)
+
+		replyBytes, err := msgpack.Marshal(&SocketHeartbeatReply{Alive: alive})
+		if err != nil {
+			transportNatsSocketHeartbeatDebug.Tracef("Failed to marshal reply: %v", err)
+			return
+		}
+
+		if err := msg.Respond(replyBytes); err != nil {
+			transportNatsSocketHeartbeatDebug.Tracef("Failed to send reply: %v", err)
+		}
 	})
 
 	if err != nil {
@@ -59,22 +94,22 @@ func (t *NatsTransport) BindSocketHeartbeatService(serviceID string, handler fun
 		return err
 	}
 
-	t.unbindSocketHeartbeatService[serviceID] = func() error {
-		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for service %s", serviceID)
+	t.unbindSocketHeartbeat[gatewayID] = func() error {
+		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
 		return sub.Unsubscribe()
 	}
 
-	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for service %s", serviceID)
+	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for gateway %s", gatewayID)
 	return nil
 }
 
-// UnbindSocketHeartbeatService unbinds the socket heartbeat handler for a service
-func (t *NatsTransport) UnbindSocketHeartbeatService(serviceID string) error {
-	if unbind, ok := t.unbindSocketHeartbeatService[serviceID]; ok {
+// UnbindSocketHeartbeat unbinds the socket heartbeat handler for a gateway
+func (t *NatsTransport) UnbindSocketHeartbeat(gatewayID string) error {
+	if unbind, ok := t.unbindSocketHeartbeat[gatewayID]; ok {
 		if err := unbind(); err != nil {
 			return err
 		}
-		delete(t.unbindSocketHeartbeatService, serviceID)
+		delete(t.unbindSocketHeartbeat, gatewayID)
 	}
 	return nil
 }

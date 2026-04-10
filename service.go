@@ -19,7 +19,7 @@ var (
 var (
 	ServicePruneInterval = 10 * time.Second
 	ClosedSocketTTL      = 30 * time.Second
-	HeartbeatTimeout     = 30 * time.Second
+	HeartbeatInterval    = 5 * time.Second
 )
 
 type routeDescriptorProvider interface {
@@ -71,11 +71,10 @@ type Service struct {
 	connectionsMu sync.Mutex
 	connections   map[string]*Connection
 	closedSockets map[string]time.Time
-	lastHeartbeat map[string]time.Time
 
-	PruneInterval    time.Duration
-	ClosedSocketTTL  time.Duration
-	HeartbeatTimeout time.Duration
+	PruneInterval     time.Duration
+	ClosedSocketTTL   time.Duration
+	HeartbeatInterval time.Duration
 
 	stopOnce sync.Once
 	stopChan chan struct{}
@@ -95,18 +94,17 @@ func NewService(name string, transport Transport, handler any) *Service {
 	router.Use(handler)
 
 	return &Service{
-		Name:             name,
-		ID:               generateID(),
-		Transport:        transport,
-		Router:           router,
-		handler:          handler,
-		connections:      map[string]*Connection{},
-		closedSockets:    map[string]time.Time{},
-		lastHeartbeat:    map[string]time.Time{},
-		PruneInterval:    ServicePruneInterval,
-		ClosedSocketTTL:  ClosedSocketTTL,
-		HeartbeatTimeout: HeartbeatTimeout,
-		stopChan:         make(chan struct{}),
+		Name:              name,
+		ID:                generateID(),
+		Transport:         transport,
+		Router:            router,
+		handler:           handler,
+		connections:       map[string]*Connection{},
+		closedSockets:     map[string]time.Time{},
+		PruneInterval:     ServicePruneInterval,
+		ClosedSocketTTL:   ClosedSocketTTL,
+		HeartbeatInterval: HeartbeatInterval,
+		stopChan:          make(chan struct{}),
 	}
 }
 
@@ -156,22 +154,10 @@ func (s *Service) Start() error {
 		return err
 	}
 
-	serviceDebug.Trace("Binding socket heartbeat handler")
-	if err := s.Transport.BindSocketHeartbeatService(s.ID, func(socketIDs []string) {
-		s.connectionsMu.Lock()
-		now := time.Now()
-		for _, socketID := range socketIDs {
-			s.lastHeartbeat[socketID] = now
-		}
-		s.connectionsMu.Unlock()
-	}); err != nil {
-		serviceDebug.Tracef("Failed to bind socket heartbeat handler: %v", err)
-		return err
-	}
-
-	serviceDebug.Trace("Starting prune loop")
-	s.stopWg.Add(1)
+	serviceDebug.Trace("Starting prune and heartbeat loops")
+	s.stopWg.Add(2)
 	go s.pruneLoop()
+	go s.heartbeatLoop()
 
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
@@ -209,11 +195,6 @@ func (s *Service) Stop() {
 		serviceDebug.Trace("Unbinding socket closed handler")
 		if err := s.Transport.UnbindSocketClosed(); err != nil {
 			serviceDebug.Tracef("Failed to unbind socket closed handler: %v", err)
-		}
-
-		serviceDebug.Trace("Unbinding socket heartbeat handler")
-		if err := s.Transport.UnbindSocketHeartbeatService(s.ID); err != nil {
-			serviceDebug.Tracef("Failed to unbind socket heartbeat handler: %v", err)
 		}
 
 		serviceDebug.Tracef("Service %s stopped successfully", s.Name)
@@ -330,7 +311,6 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 
 	go s.Router.HandleConnection(info, connection)
 	s.connections[socketID] = connection
-	s.lastHeartbeat[socketID] = time.Now()
 
 	return connection
 }
@@ -339,7 +319,6 @@ func (s *Service) closeConnection(socketID string, status velaros.Status, reason
 	s.connectionsMu.Lock()
 	connection, ok := s.connections[socketID]
 	delete(s.connections, socketID)
-	delete(s.lastHeartbeat, socketID)
 	s.closedSockets[socketID] = time.Now()
 	s.connectionsMu.Unlock()
 
@@ -379,44 +358,46 @@ func (s *Service) pruneLoop() {
 
 func (s *Service) pruneStaleResources() {
 	s.connectionsMu.Lock()
-
 	now := time.Now()
-
 	for socketID, closedAt := range s.closedSockets {
 		if now.Sub(closedAt) > s.ClosedSocketTTL {
 			serviceHandleDebug.Tracef("Pruning closed socket record for %s", socketID)
 			delete(s.closedSockets, socketID)
 		}
 	}
-
-	// Collect stale connections under the lock, then release before calling
-	// HandleClose to avoid re-entrant lock issues with the onClosed callback.
-	type staleEntry struct {
-		socketID   string
-		connection *Connection
-	}
-	var stale []staleEntry
-	for socketID := range s.connections {
-		lastHB, hasHeartbeat := s.lastHeartbeat[socketID]
-		if !hasHeartbeat || now.Sub(lastHB) > s.HeartbeatTimeout {
-			serviceHandleDebug.Tracef("Connection %s has stale heartbeat, closing", socketID)
-			stale = append(stale, staleEntry{socketID, s.connections[socketID]})
-		}
-	}
-
-	// Remove from maps while we still hold the lock.
-	for _, e := range stale {
-		delete(s.connections, e.socketID)
-		delete(s.lastHeartbeat, e.socketID)
-		s.closedSockets[e.socketID] = now
-	}
-
 	s.connectionsMu.Unlock()
+}
 
-	// Now call HandleClose outside the lock — safe because HandleClose is
-	// idempotent (sync.Once) and onClosed's delete is a no-op for keys
-	// we already removed.
-	for _, e := range stale {
-		e.connection.HandleClose(velaros.StatusGoingAway, "No heartbeat received")
+func (s *Service) heartbeatLoop() {
+	defer s.stopWg.Done()
+	ticker := time.NewTicker(s.HeartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			s.connectionsMu.Lock()
+			type entry struct {
+				gatewayID string
+				socketID  string
+			}
+			var entries []entry
+			for socketID, conn := range s.connections {
+				entries = append(entries, entry{conn.GatewayID(), socketID})
+			}
+			s.connectionsMu.Unlock()
+
+			for _, e := range entries {
+				if err := s.Transport.HeartbeatSocket(e.gatewayID, s.ID, e.socketID); err != nil {
+					serviceHandleDebug.Tracef("No heartbeat response for socket %s from gateway %s: %v, closing", e.socketID, e.gatewayID, err)
+					s.closeConnection(e.socketID, velaros.StatusGoingAway, "No heartbeat response")
+					if err := s.Transport.ClosedSocket(e.socketID, velaros.StatusGoingAway, "No heartbeat response"); err != nil {
+						serviceHandleDebug.Tracef("Error notifying closed socket %s: %v", e.socketID, err)
+					}
+				}
+			}
+		}
 	}
 }
