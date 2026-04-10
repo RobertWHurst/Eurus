@@ -1,11 +1,7 @@
-github.com/RobertWHurst/navaros v1.22.0 h1:weiZbAeycf6Bp/fU+41QZbGv/jd2y+UPA08afz7SbG0=
-github.com/RobertWHurst/navaros v1.22.0/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
 github.com/RobertWHurst/navaros v1.22.1 h1:uS4+3nuxaWq3Ys8UbSUmLOMb8G8OOIwTRqcCxys0VJ8=
 github.com/RobertWHurst/navaros v1.22.1/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
-github.com/RobertWHurst/velaros v1.25.1 h1:xYLMNIfVPE8v7HEJKShvsm1oF5O69/ZCiLF29S6H6lE=
-github.com/RobertWHurst/velaros v1.25.1/go.mod h1:cuy6sNEWE6Och7g09sKHAw1vCEQyLdhtLJmpzD07JDQ=
-github.com/RobertWHurst/velaros v1.26.0 h1:FhM7K/ugM8xB5f7zVsXwV9a9LxiQ8YWF843ZGNZl1oA=
-github.com/RobertWHurst/velaros v1.26.0/go.mod h1:7SpgpAD+4j8jXMMF7lD5cE6tPxjwPONedRuVG/F26bU=
+github.com/RobertWHurst/velaros v1.27.0 h1:im/ZYo/jboTqr4cLYwV/nnVsPHhMvQnnMAbyJOlCrTw=
+github.com/RobertWHurst/velaros v1.27.0/go.mod h1:7SpgpAD+4j8jXMMF7lD5cE6tPxjwPONedRuVG/F26bU=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
 github.com/coder/websocket v1.8.14/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
