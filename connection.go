@@ -42,7 +42,7 @@ func NewConnection(transport Transport, gatewayID, socketID string, info *velaro
 		socketID:    socketID,
 		headers:     info.Headers,
 		remoteAttr:  info.RemoteAddr,
-		messageChan: make(chan *velaros.SocketMessage, 100),
+		messageChan: make(chan *velaros.SocketMessage),
 
 		onClosed:  onClosed,
 		ctxCancel: cancel,
@@ -73,15 +73,12 @@ func (c *Connection) HandleClose(status velaros.Status, reason string) {
 	})
 }
 
-func (c *Connection) Read(socketCtx context.Context) (*velaros.SocketMessage, error) {
+func (c *Connection) Read(readCtx context.Context) (*velaros.SocketMessage, error) {
 	select {
-	// Cancelled by service shutdown or connection close
 	case <-c.ctx.Done():
 		return nil, c.ctx.Err()
-	// Cancelled by service handler
-	case <-socketCtx.Done():
-		return nil, socketCtx.Err()
-	// New message received
+	case <-readCtx.Done():
+		return nil, readCtx.Err()
 	case msg := <-c.messageChan:
 		return msg, nil
 	}

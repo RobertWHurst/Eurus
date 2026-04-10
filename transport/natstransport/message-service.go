@@ -1,7 +1,9 @@
 package natstransport
 
 import (
+	"math"
 	"net/http"
+	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
@@ -142,35 +144,35 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	transportNatsMessageDebug.Tracef("Binding message handler for service %s", serviceID)
 
 	subject := namespace("service", serviceID, "message")
-
-	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
-		t.messageHandlerWg.Add(1)
-		go func() {
-			defer t.messageHandlerWg.Done()
-
-			assembled, header, err := func() ([]byte, *ServiceMessageHeader, error) {
-				t.messageParserSem <- struct{}{}
-				defer func() { <-t.messageParserSem }()
-				return t.parseServiceMessage(msg)
-			}()
-
-			if err != nil {
-				transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
-				return
-			}
-
-			t.handleServiceMessage(assembled, header, handler)
-		}()
-	})
-
+	sub, err := t.NatsConnection.SubscribeSync(subject)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to subscribe: %v", err)
 		return err
 	}
 
+	doneCh := make(chan struct{})
+
+	go func() {
+		defer close(doneCh)
+		for {
+			msg, err := sub.NextMsg(time.Duration(math.MaxInt64))
+			if err != nil {
+				break
+			}
+			assembled, header, err := t.parseServiceMessage(msg)
+			if err != nil {
+				transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
+				continue
+			}
+			t.handleServiceMessage(assembled, header, handler)
+		}
+	}()
+
 	t.unbindMessageService[serviceID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
-		return sub.Unsubscribe()
+		err := sub.Unsubscribe()
+		<-doneCh
+		return err
 	}
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
@@ -278,6 +280,5 @@ func (t *NatsTransport) UnbindMessageService(serviceID string) error {
 		}
 		delete(t.unbindMessageService, serviceID)
 	}
-	t.messageHandlerWg.Wait()
 	return nil
 }
