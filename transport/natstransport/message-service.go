@@ -149,13 +149,12 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		return err
 	}
 
-	loopCtx, loopCancel := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
 
 	go func() {
 		defer close(doneCh)
 		for {
-			msg, err := sub.NextMsgWithContext(loopCtx)
+			msg, err := sub.NextMsgWithContext(context.Background())
 			if err != nil {
 				break
 			}
@@ -170,7 +169,6 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 
 	t.unbindMessageService[serviceID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
-		loopCancel()
 		err := sub.Unsubscribe()
 		<-doneCh
 		return err
