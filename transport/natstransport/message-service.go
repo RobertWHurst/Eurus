@@ -1,9 +1,8 @@
 package natstransport
 
 import (
-	"math"
+	"context"
 	"net/http"
-	"time"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
@@ -150,12 +149,13 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		return err
 	}
 
+	loopCtx, loopCancel := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
 
 	go func() {
 		defer close(doneCh)
 		for {
-			msg, err := sub.NextMsg(time.Duration(math.MaxInt64))
+			msg, err := sub.NextMsgWithContext(loopCtx)
 			if err != nil {
 				break
 			}
@@ -170,6 +170,7 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 
 	t.unbindMessageService[serviceID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
+		loopCancel()
 		err := sub.Unsubscribe()
 		<-doneCh
 		return err

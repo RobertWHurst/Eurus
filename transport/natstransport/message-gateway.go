@@ -1,8 +1,7 @@
 package natstransport
 
 import (
-	"math"
-	"time"
+	"context"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
@@ -144,11 +143,13 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 		return err
 	}
 
+	loopCtx, loopCancel := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})
+
 	go func() {
 		defer close(doneCh)
 		for {
-			msg, err := sub.NextMsg(time.Duration(math.MaxInt64))
+			msg, err := sub.NextMsgWithContext(loopCtx)
 			if err != nil {
 				break
 			}
@@ -163,6 +164,7 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 
 	t.unbindMessageGateway[gatewayID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for gateway %s", gatewayID)
+		loopCancel()
 		err := sub.Unsubscribe()
 		<-doneCh
 		return err
