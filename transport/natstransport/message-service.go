@@ -149,21 +149,33 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		return err
 	}
 
+	const messageWorkerCount = 32
+
+	workerCh := make(chan *nats.Msg, messageWorkerCount)
+	for range messageWorkerCount {
+		go func() {
+			for msg := range workerCh {
+				assembled, header, err := t.parseServiceMessage(msg)
+				if err != nil {
+					transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
+					continue
+				}
+				t.handleServiceMessage(assembled, header, handler)
+			}
+		}()
+	}
+
 	doneCh := make(chan struct{})
 
 	go func() {
 		defer close(doneCh)
+		defer close(workerCh)
 		for {
 			msg, err := sub.NextMsgWithContext(context.Background())
 			if err != nil {
 				break
 			}
-			assembled, header, err := t.parseServiceMessage(msg)
-			if err != nil {
-				transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
-				continue
-			}
-			t.handleServiceMessage(assembled, header, handler)
+			workerCh <- msg
 		}
 	}()
 
