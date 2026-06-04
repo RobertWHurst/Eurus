@@ -44,8 +44,10 @@ func (c *NatsTransport) BindGatewayAnnounce(handler func(gatewayDescriptor *euru
 		gatewayDescriptor := &eurus.GatewayDescriptor{}
 
 		if err := msgpack.Unmarshal(gatewayDescriptorBuf, gatewayDescriptor); err != nil {
-			transportNatsAnnounceDebug.Tracef("Failed to unmarshal gateway descriptor: %v", err)
-			panic(err)
+			// A malformed announcement from any peer on the bus must not crash
+			// this subscriber. Log and drop it.
+			transportNatsAnnounceDebug.Tracef("Failed to unmarshal gateway descriptor, dropping: %v", err)
+			return
 		}
 
 		transportNatsAnnounceDebug.Tracef("Received announcement from gateway %s with %d services",
@@ -64,17 +66,26 @@ func (c *NatsTransport) BindGatewayAnnounce(handler func(gatewayDescriptor *euru
 	}
 
 	transportNatsAnnounceDebug.Trace("Successfully subscribed to gateway announcements")
+	c.mu.Lock()
 	c.unbindGatewayAnnounce = func() error {
 		transportNatsAnnounceDebug.Trace("Unsubscribing from gateway announcements")
 		return gatewayAnnounceSub.Unsubscribe()
 	}
+	c.mu.Unlock()
 
 	return nil
 }
 
 func (c *NatsTransport) UnbindGatewayAnnounce() error {
 	transportNatsAnnounceDebug.Trace("Unbinding gateway announcement handler")
-	err := c.unbindGatewayAnnounce()
+	c.mu.Lock()
+	unbind := c.unbindGatewayAnnounce
+	c.unbindGatewayAnnounce = nil
+	c.mu.Unlock()
+	if unbind == nil {
+		return nil
+	}
+	err := unbind()
 	if err != nil {
 		transportNatsAnnounceDebug.Tracef("Failed to unbind gateway announcement handler: %v", err)
 	} else {

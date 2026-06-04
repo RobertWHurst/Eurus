@@ -39,8 +39,10 @@ func (c *NatsTransport) BindServiceAnnounce(handler func(serviceDescriptor *euru
 		serviceDescriptor := &eurus.ServiceDescriptor{}
 
 		if err := msgpack.Unmarshal(serviceDescriptorBuf, serviceDescriptor); err != nil {
-			transportNatsAnnounceDebug.Tracef("Failed to unmarshal service descriptor: %v", err)
-			panic(err)
+			// A malformed announcement from any peer on the bus must not crash
+			// this subscriber. Log and drop it.
+			transportNatsAnnounceDebug.Tracef("Failed to unmarshal service descriptor, dropping: %v", err)
+			return
 		}
 
 		transportNatsAnnounceDebug.Tracef("Received announcement from service %s with %d routes",
@@ -59,17 +61,26 @@ func (c *NatsTransport) BindServiceAnnounce(handler func(serviceDescriptor *euru
 	}
 
 	transportNatsAnnounceDebug.Trace("Successfully subscribed to service announcements")
+	c.mu.Lock()
 	c.unbindServiceAnnounce = func() error {
 		transportNatsAnnounceDebug.Trace("Unsubscribing from service announcements")
 		return serviceAnnounceSub.Unsubscribe()
 	}
+	c.mu.Unlock()
 
 	return nil
 }
 
 func (c *NatsTransport) UnbindServiceAnnounce() error {
 	transportNatsAnnounceDebug.Trace("Unbinding service announcement handler")
-	err := c.unbindServiceAnnounce()
+	c.mu.Lock()
+	unbind := c.unbindServiceAnnounce
+	c.unbindServiceAnnounce = nil
+	c.mu.Unlock()
+	if unbind == nil {
+		return nil
+	}
+	err := unbind()
 	if err != nil {
 		transportNatsAnnounceDebug.Tracef("Failed to unbind service announcement handler: %v", err)
 	} else {

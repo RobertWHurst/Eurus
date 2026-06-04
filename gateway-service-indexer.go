@@ -8,7 +8,11 @@ import (
 )
 
 type GatewayServiceIndexer struct {
-	mu               sync.Mutex
+	// mu is an RWMutex because reads (ResolveService on every routed message,
+	// plus the announce/prune snapshots) vastly outnumber writes (service
+	// announce/unset). Read paths take RLock so concurrent message routing
+	// does not serialize on a single lock.
+	mu               sync.RWMutex
 	closed           bool
 	descriptors      []*ServiceDescriptor
 	servicesByName   map[string][]*ServiceDescriptor
@@ -33,8 +37,8 @@ func (r *GatewayServiceIndexer) Close() {
 }
 
 func (r *GatewayServiceIndexer) IsClosed() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.closed
 }
 
@@ -112,8 +116,8 @@ func (r *GatewayServiceIndexer) unsetServiceLocked(id string) error {
 
 // ServiceDescriptors returns a snapshot of all current service descriptors.
 func (r *GatewayServiceIndexer) ServiceDescriptors() []*ServiceDescriptor {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	if r.closed {
 		return nil
@@ -123,8 +127,8 @@ func (r *GatewayServiceIndexer) ServiceDescriptors() []*ServiceDescriptor {
 }
 
 func (r *GatewayServiceIndexer) FreshServiceDescriptors(threshold time.Duration) []*ServiceDescriptor {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	if r.closed {
 		return nil
@@ -185,8 +189,8 @@ func (r *GatewayServiceIndexer) PruneStaleServices(threshold time.Duration) ([]s
 }
 
 func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	if r.closed {
 		return "", false
@@ -245,8 +249,8 @@ func (r *GatewayServiceIndexer) MapSocket(serviceName, socketID string) (string,
 }
 
 func (r *GatewayServiceIndexer) SocketIDsByServiceInstance() map[string][]string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	if r.closed {
 		return nil

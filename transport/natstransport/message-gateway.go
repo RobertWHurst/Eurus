@@ -20,6 +20,18 @@ type GatewayMessagePayload struct {
 	Meta    map[string]any `msgpack:"meta"`
 }
 
+// GatewayMessageInit is the first frame of a service->gateway message. When
+// Stream is false the marshaled GatewayMessagePayload is carried inline in
+// Payload, delivering the whole message in a single request/reply round trip.
+// When Stream is true, Payload is empty and the chunk-streaming protocol
+// follows on the subject returned in the MessageAck — used only for payloads
+// larger than MaxChunkSize.
+type GatewayMessageInit struct {
+	Header  *GatewayMessageHeader `msgpack:"header"`
+	Stream  bool                  `msgpack:"stream"`
+	Payload []byte                `msgpack:"payload,omitempty"`
+}
+
 // MessageGateway sends a message from service to gateway
 func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *velaros.SocketMessage) error {
 	transportNatsMessageDebug.Tracef("Sending message to gateway %s for socket %s", gatewayID, socketID)
@@ -31,14 +43,48 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *v
 		MessageType: msg.Type,
 	}
 
-	headerBytes, err := msgpack.Marshal(header)
+	payload := &GatewayMessagePayload{
+		RawData: msg.RawData,
+		Data:    msg.Data,
+		Meta:    msg.Meta,
+	}
+	payloadBytes, err := msgpack.Marshal(payload)
 	if err != nil {
-		transportNatsMessageDebug.Tracef("Failed to marshal header: %v", err)
+		transportNatsMessageDebug.Tracef("Failed to marshal payload: %v", err)
+		return err
+	}
+
+	// Fast path: payloads that fit in a single chunk are delivered inline with
+	// the header in one request/reply round trip, avoiding the per-chunk
+	// handshake and the per-message ephemeral subscription.
+	if len(payloadBytes) <= MaxChunkSize {
+		initBytes, err := msgpack.Marshal(&GatewayMessageInit{
+			Header:  header,
+			Stream:  false,
+			Payload: payloadBytes,
+		})
+		if err != nil {
+			transportNatsMessageDebug.Tracef("Failed to marshal inline init: %v", err)
+			return err
+		}
+		transportNatsMessageDebug.Tracef("Sending inline message (%d bytes)", len(payloadBytes))
+		if _, err := t.NatsConnection.Request(subject, initBytes, MessageTimeout); err != nil {
+			transportNatsMessageDebug.Tracef("Inline message failed: %v", err)
+			return err
+		}
+		transportNatsMessageDebug.Trace("Inline message sent successfully")
+		return nil
+	}
+
+	// Streaming path: announce intent to stream and obtain a chunk subject.
+	initBytes, err := msgpack.Marshal(&GatewayMessageInit{Header: header, Stream: true})
+	if err != nil {
+		transportNatsMessageDebug.Tracef("Failed to marshal streaming init: %v", err)
 		return err
 	}
 
 	transportNatsMessageDebug.Trace("Sending message header, waiting for ack")
-	ackMsg, err := t.NatsConnection.Request(subject, headerBytes, MessageTimeout)
+	ackMsg, err := t.NatsConnection.Request(subject, initBytes, MessageTimeout)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to get ack: %v", err)
 		return err
@@ -52,17 +98,6 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *v
 
 	chunkSubject := ack.ChunkSubject
 	transportNatsMessageDebug.Tracef("Received chunk subject: %s", chunkSubject)
-
-	payload := &GatewayMessagePayload{
-		RawData: msg.RawData,
-		Data:    msg.Data,
-		Meta:    msg.Meta,
-	}
-	payloadBytes, err := msgpack.Marshal(payload)
-	if err != nil {
-		transportNatsMessageDebug.Tracef("Failed to marshal payload: %v", err)
-		return err
-	}
 
 	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(payloadBytes))
 	offset := 0
@@ -143,43 +178,73 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 		return err
 	}
 
+	// Each inbound message triggers a synchronous, multi-round-trip chunk
+	// reassembly bounded by MessageTimeout. A single goroutine would let one
+	// slow/stalled reply block delivery to every other socket on this gateway
+	// (head-of-line blocking), so dispatch across a pool of workers with a
+	// bounded channel for backpressure. This mirrors BindMessageService.
+	const messageWorkerCount = 32
+
+	workerCh := make(chan *nats.Msg, messageWorkerCount)
+	for range messageWorkerCount {
+		go func() {
+			for msg := range workerCh {
+				assembled, header, err := t.parseGatewayMessage(msg)
+				if err != nil {
+					transportNatsMessageDebug.Tracef("Error parsing gateway message: %v", err)
+					continue
+				}
+				t.handleGatewayMessage(assembled, header, handler)
+			}
+		}()
+	}
+
 	doneCh := make(chan struct{})
 
 	go func() {
 		defer close(doneCh)
+		defer close(workerCh)
 		for {
 			msg, err := sub.NextMsgWithContext(context.Background())
 			if err != nil {
 				break
 			}
-			assembled, header, err := t.parseGatewayMessage(msg)
-			if err != nil {
-				transportNatsMessageDebug.Tracef("Error parsing gateway message: %v", err)
-				continue
-			}
-			t.handleGatewayMessage(assembled, header, handler)
+			workerCh <- msg
 		}
 	}()
 
+	t.mu.Lock()
 	t.unbindMessageGateway[gatewayID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for gateway %s", gatewayID)
 		err := sub.Unsubscribe()
 		<-doneCh
 		return err
 	}
+	t.mu.Unlock()
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
 	return nil
 }
 
 func (t *NatsTransport) parseGatewayMessage(msg *nats.Msg) ([]byte, *GatewayMessageHeader, error) {
-	header := &GatewayMessageHeader{}
-	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
-		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
+	init := &GatewayMessageInit{}
+	if err := msgpack.Unmarshal(msg.Data, init); err != nil {
+		transportNatsMessageDebug.Tracef("Failed to unmarshal init: %v", err)
 		return nil, nil, err
 	}
+	header := init.Header
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
+
+	// Inline fast path: payload arrived with the header. Ack and return it.
+	if !init.Stream {
+		if err := t.NatsConnection.Publish(msg.Reply, nil); err != nil {
+			transportNatsMessageDebug.Tracef("Failed to ack inline message: %v", err)
+			return nil, nil, err
+		}
+		transportNatsMessageDebug.Tracef("Received inline message (%d bytes)", len(init.Payload))
+		return init.Payload, header, nil
+	}
 
 	chunkSubject := nats.NewInbox()
 	chunkSub, err := t.NatsConnection.SubscribeSync(chunkSubject)
@@ -263,11 +328,14 @@ func (t *NatsTransport) handleGatewayMessage(assembled []byte, header *GatewayMe
 
 // UnbindMessageGateway unbinds the message handler for a gateway
 func (t *NatsTransport) UnbindMessageGateway(gatewayID string) error {
-	if unbind, ok := t.unbindMessageGateway[gatewayID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
+	t.mu.Lock()
+	unbind, ok := t.unbindMessageGateway[gatewayID]
+	if ok {
 		delete(t.unbindMessageGateway, gatewayID)
 	}
-	return nil
+	t.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return unbind()
 }

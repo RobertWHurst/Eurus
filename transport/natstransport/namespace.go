@@ -18,33 +18,36 @@ func namespace(strValues ...string) string {
 }
 
 func formatForNamespace(str string) string {
-	formattedStr := []rune{}
-	for i, r := range str {
-		pi := i - 1
-		var pr rune
-		if pi >= 0 {
-			pr = []rune(str)[pi]
-		}
+	// Build into a byte builder sized to the input. All characters emitted are
+	// ASCII (camelCase boundaries insert at most one extra '-'), so a builder
+	// grown to len(str) covers the common case without reallocation.
+	var b strings.Builder
+	b.Grow(len(str) + 1)
+
+	var pr rune
+	for _, r := range str {
 		switch {
 		case r >= 'A' && r <= 'Z':
 			if pr >= 'a' && pr <= 'z' {
-				formattedStr = append(formattedStr, '-', unicode.ToLower(r))
+				b.WriteByte('-')
+				b.WriteRune(unicode.ToLower(r))
 			} else {
-				formattedStr = append(formattedStr, r)
+				b.WriteRune(r)
 			}
 		case r >= 'a' && r <= 'z':
-			formattedStr = append(formattedStr, r)
+			b.WriteRune(r)
 		case r >= '0' && r <= '9':
-			formattedStr = append(formattedStr, r)
+			b.WriteRune(r)
 		case r == '-':
-			formattedStr = append(formattedStr, '-')
+			b.WriteByte('-')
 		case r == '_':
-			formattedStr = append(formattedStr, '-')
+			b.WriteByte('-')
 		case r == '.':
-			formattedStr = append(formattedStr, '.')
+			b.WriteByte('.')
 		case r == '*':
-			formattedStr = append(formattedStr, '*')
+			b.WriteByte('*')
 		}
+		pr = r
 	}
-	return string(formattedStr)
+	return b.String()
 }

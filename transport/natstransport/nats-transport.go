@@ -1,12 +1,19 @@
 package natstransport
 
 import (
-"github.com/RobertWHurst/eurus"
+	"sync"
+
+	"github.com/RobertWHurst/eurus"
 	"github.com/nats-io/nats.go"
 )
 
 type NatsTransport struct {
-	NatsConnection        *nats.Conn
+	NatsConnection *nats.Conn
+
+	// mu guards the unbind handles below. A single NatsTransport can be shared
+	// across multiple services/gateways (the handles are keyed by ID), so
+	// concurrent Bind*/Unbind* calls must not race on these fields/maps.
+	mu                    sync.Mutex
 	unbindServiceAnnounce func() error
 	unbindGatewayAnnounce func() error
 	unbindMessageService  map[string]func() error

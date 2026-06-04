@@ -69,10 +69,12 @@ func (t *NatsTransport) BindSocketClosed(handler func(socketID string, status we
 		return err
 	}
 
+	t.mu.Lock()
 	t.unbindSocketClosed = func() error {
 		transportNatsSocketClosedDebug.Trace("Unbinding socket closed handler")
 		return sub.Unsubscribe()
 	}
+	t.mu.Unlock()
 
 	transportNatsSocketClosedDebug.Trace("Socket closed handler bound successfully")
 	return nil
@@ -80,8 +82,12 @@ func (t *NatsTransport) BindSocketClosed(handler func(socketID string, status we
 
 // UnbindSocketClosed unbinds the socket closed handler
 func (t *NatsTransport) UnbindSocketClosed() error {
-	if t.unbindSocketClosed != nil {
-		return t.unbindSocketClosed()
+	t.mu.Lock()
+	unbind := t.unbindSocketClosed
+	t.unbindSocketClosed = nil
+	t.mu.Unlock()
+	if unbind == nil {
+		return nil
 	}
-	return nil
+	return unbind()
 }

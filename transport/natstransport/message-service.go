@@ -24,6 +24,18 @@ type ServiceMessagePayload struct {
 	Meta    map[string]any `msgpack:"meta"`
 }
 
+// ServiceMessageInit is the first frame of a gateway->service message. When
+// Stream is false the marshaled ServiceMessagePayload is carried inline in
+// Payload, so the whole message is delivered in a single request/reply round
+// trip. When Stream is true, Payload is empty and the chunk-streaming protocol
+// follows on the subject returned in the MessageAck — used only for payloads
+// larger than MaxChunkSize.
+type ServiceMessageInit struct {
+	Header  *ServiceMessageHeader `msgpack:"header"`
+	Stream  bool                  `msgpack:"stream"`
+	Payload []byte                `msgpack:"payload,omitempty"`
+}
+
 // MessageService sends a message from gateway to service
 func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) error {
 	transportNatsMessageDebug.Tracef("Sending message to service %s from gateway %s socket %s", serviceID, gatewayID, socketID)
@@ -38,14 +50,48 @@ func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, co
 		MessageType: msg.Type,
 	}
 
-	headerBytes, err := msgpack.Marshal(header)
+	payload := &ServiceMessagePayload{
+		RawData: msg.RawData,
+		Data:    msg.Data,
+		Meta:    msg.Meta,
+	}
+	payloadBytes, err := msgpack.Marshal(payload)
 	if err != nil {
-		transportNatsMessageDebug.Tracef("Failed to marshal header: %v", err)
+		transportNatsMessageDebug.Tracef("Failed to marshal payload: %v", err)
+		return err
+	}
+
+	// Fast path: payloads that fit in a single chunk are delivered inline with
+	// the header in one request/reply round trip, avoiding the per-chunk
+	// handshake and the per-message ephemeral subscription.
+	if len(payloadBytes) <= MaxChunkSize {
+		initBytes, err := msgpack.Marshal(&ServiceMessageInit{
+			Header:  header,
+			Stream:  false,
+			Payload: payloadBytes,
+		})
+		if err != nil {
+			transportNatsMessageDebug.Tracef("Failed to marshal inline init: %v", err)
+			return err
+		}
+		transportNatsMessageDebug.Tracef("Sending inline message (%d bytes)", len(payloadBytes))
+		if _, err := t.NatsConnection.Request(subject, initBytes, MessageTimeout); err != nil {
+			transportNatsMessageDebug.Tracef("Inline message failed: %v", err)
+			return err
+		}
+		transportNatsMessageDebug.Trace("Inline message sent successfully")
+		return nil
+	}
+
+	// Streaming path: announce intent to stream and obtain a chunk subject.
+	initBytes, err := msgpack.Marshal(&ServiceMessageInit{Header: header, Stream: true})
+	if err != nil {
+		transportNatsMessageDebug.Tracef("Failed to marshal streaming init: %v", err)
 		return err
 	}
 
 	transportNatsMessageDebug.Trace("Sending message header, waiting for ack")
-	ackMsg, err := t.NatsConnection.Request(subject, headerBytes, MessageTimeout)
+	ackMsg, err := t.NatsConnection.Request(subject, initBytes, MessageTimeout)
 	if err != nil {
 		transportNatsMessageDebug.Tracef("Failed to get ack: %v", err)
 		return err
@@ -59,17 +105,6 @@ func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, co
 
 	chunkSubject := ack.ChunkSubject
 	transportNatsMessageDebug.Tracef("Received chunk subject: %s", chunkSubject)
-
-	payload := &ServiceMessagePayload{
-		RawData: msg.RawData,
-		Data:    msg.Data,
-		Meta:    msg.Meta,
-	}
-	payloadBytes, err := msgpack.Marshal(payload)
-	if err != nil {
-		transportNatsMessageDebug.Tracef("Failed to marshal payload: %v", err)
-		return err
-	}
 
 	transportNatsMessageDebug.Tracef("Streaming %d bytes", len(payloadBytes))
 	offset := 0
@@ -179,25 +214,38 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		}
 	}()
 
+	t.mu.Lock()
 	t.unbindMessageService[serviceID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
 		err := sub.Unsubscribe()
 		<-doneCh
 		return err
 	}
+	t.mu.Unlock()
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
 	return nil
 }
 
 func (t *NatsTransport) parseServiceMessage(msg *nats.Msg) ([]byte, *ServiceMessageHeader, error) {
-	header := &ServiceMessageHeader{}
-	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
-		transportNatsMessageDebug.Tracef("Failed to unmarshal header: %v", err)
+	init := &ServiceMessageInit{}
+	if err := msgpack.Unmarshal(msg.Data, init); err != nil {
+		transportNatsMessageDebug.Tracef("Failed to unmarshal init: %v", err)
 		return nil, nil, err
 	}
+	header := init.Header
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
+
+	// Inline fast path: payload arrived with the header. Ack and return it.
+	if !init.Stream {
+		if err := t.NatsConnection.Publish(msg.Reply, nil); err != nil {
+			transportNatsMessageDebug.Tracef("Failed to ack inline message: %v", err)
+			return nil, nil, err
+		}
+		transportNatsMessageDebug.Tracef("Received inline message (%d bytes)", len(init.Payload))
+		return init.Payload, header, nil
+	}
 
 	chunkSubject := nats.NewInbox()
 	chunkSub, err := t.NatsConnection.SubscribeSync(chunkSubject)
@@ -285,11 +333,14 @@ func (t *NatsTransport) handleServiceMessage(assembled []byte, header *ServiceMe
 
 // UnbindMessageService unbinds the message handler for a service
 func (t *NatsTransport) UnbindMessageService(serviceID string) error {
-	if unbind, ok := t.unbindMessageService[serviceID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
+	t.mu.Lock()
+	unbind, ok := t.unbindMessageService[serviceID]
+	if ok {
 		delete(t.unbindMessageService, serviceID)
 	}
-	return nil
+	t.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return unbind()
 }

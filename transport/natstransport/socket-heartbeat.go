@@ -94,10 +94,12 @@ func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(servi
 		return err
 	}
 
+	t.mu.Lock()
 	t.unbindSocketHeartbeat[gatewayID] = func() error {
 		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
 		return sub.Unsubscribe()
 	}
+	t.mu.Unlock()
 
 	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for gateway %s", gatewayID)
 	return nil
@@ -105,11 +107,14 @@ func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(servi
 
 // UnbindSocketHeartbeat unbinds the socket heartbeat handler for a gateway
 func (t *NatsTransport) UnbindSocketHeartbeat(gatewayID string) error {
-	if unbind, ok := t.unbindSocketHeartbeat[gatewayID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
+	t.mu.Lock()
+	unbind, ok := t.unbindSocketHeartbeat[gatewayID]
+	if ok {
 		delete(t.unbindSocketHeartbeat, gatewayID)
 	}
-	return nil
+	t.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return unbind()
 }
