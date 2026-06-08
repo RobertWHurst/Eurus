@@ -2,6 +2,7 @@ package natstransport
 
 import (
 	"context"
+	"sync"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
@@ -186,8 +187,11 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	const messageWorkerCount = 32
 
 	workerCh := make(chan *nats.Msg, messageWorkerCount)
+	var workerWg sync.WaitGroup
+	workerWg.Add(messageWorkerCount)
 	for range messageWorkerCount {
 		go func() {
+			defer workerWg.Done()
 			for msg := range workerCh {
 				assembled, header, err := t.parseGatewayMessage(msg)
 				if err != nil {
@@ -214,13 +218,27 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 	}()
 
 	t.mu.Lock()
+	// Capture any prior unbind so a re-bind without an intervening Unbind does
+	// not leak the old subscription and worker pool. The closure blocks on
+	// <-doneCh + workerWg.Wait(), so it must be invoked after releasing t.mu.
+	previousUnbind := t.unbindMessageGateway[gatewayID]
 	t.unbindMessageGateway[gatewayID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for gateway %s", gatewayID)
 		err := sub.Unsubscribe()
+		// Wait for the reader loop to exit (which closes workerCh) and then for
+		// all workers to drain any buffered/in-flight messages, preserving the
+		// pre-pool guarantee that unbind blocks until parse/handle work finishes.
 		<-doneCh
+		workerWg.Wait()
 		return err
 	}
 	t.mu.Unlock()
+
+	if previousUnbind != nil {
+		if err := previousUnbind(); err != nil {
+			transportNatsMessageDebug.Tracef("Failed to unbind previous message handler for gateway %s: %v", gatewayID, err)
+		}
+	}
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
 	return nil
@@ -233,6 +251,10 @@ func (t *NatsTransport) parseGatewayMessage(msg *nats.Msg) ([]byte, *GatewayMess
 		return nil, nil, err
 	}
 	header := init.Header
+	if header == nil {
+		transportNatsMessageDebug.Trace("Rejecting gateway message with nil header")
+		return nil, nil, errNilMessageHeader
+	}
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
 

@@ -62,6 +62,15 @@ func (c *NatsTransport) BindServiceAnnounce(handler func(serviceDescriptor *euru
 
 	transportNatsAnnounceDebug.Trace("Successfully subscribed to service announcements")
 	c.mu.Lock()
+	// Tear down any prior subscription before overwriting, so a re-bind without
+	// an intervening Unbind does not leak the old subscription. The unbind
+	// closure here is a non-blocking Unsubscribe, so it is safe to call while
+	// holding c.mu.
+	if c.unbindServiceAnnounce != nil {
+		if err := c.unbindServiceAnnounce(); err != nil {
+			transportNatsAnnounceDebug.Tracef("Failed to unbind previous service announce handler: %v", err)
+		}
+	}
 	c.unbindServiceAnnounce = func() error {
 		transportNatsAnnounceDebug.Trace("Unsubscribing from service announcements")
 		return serviceAnnounceSub.Unsubscribe()

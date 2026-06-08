@@ -95,6 +95,15 @@ func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(servi
 	}
 
 	t.mu.Lock()
+	// Tear down any prior subscription for this gateway before overwriting, so a
+	// re-bind without an intervening Unbind does not leak the old subscription.
+	// The unbind closure here is a non-blocking Unsubscribe, so it is safe to
+	// call while holding t.mu.
+	if existing, ok := t.unbindSocketHeartbeat[gatewayID]; ok {
+		if err := existing(); err != nil {
+			transportNatsSocketHeartbeatDebug.Tracef("Failed to unbind previous socket heartbeat handler for gateway %s: %v", gatewayID, err)
+		}
+	}
 	t.unbindSocketHeartbeat[gatewayID] = func() error {
 		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
 		return sub.Unsubscribe()

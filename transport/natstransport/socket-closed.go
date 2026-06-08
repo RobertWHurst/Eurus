@@ -70,6 +70,15 @@ func (t *NatsTransport) BindSocketClosed(handler func(socketID string, status we
 	}
 
 	t.mu.Lock()
+	// Tear down any prior subscription before overwriting, so a re-bind without
+	// an intervening Unbind does not leak the old subscription. The unbind
+	// closure here is a non-blocking Unsubscribe, so it is safe to call while
+	// holding t.mu.
+	if t.unbindSocketClosed != nil {
+		if err := t.unbindSocketClosed(); err != nil {
+			transportNatsSocketClosedDebug.Tracef("Failed to unbind previous socket closed handler: %v", err)
+		}
+	}
 	t.unbindSocketClosed = func() error {
 		transportNatsSocketClosedDebug.Trace("Unbinding socket closed handler")
 		return sub.Unsubscribe()

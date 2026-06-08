@@ -2,13 +2,21 @@ package natstransport
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/vmihailenco/msgpack/v5"
 )
+
+// errNilMessageHeader is returned when a peer publishes a message init frame
+// whose Header is nil. Dereferencing it would panic the parse worker (and, on
+// older single-goroutine paths, the subscription callback), so such messages
+// are rejected and dropped instead.
+var errNilMessageHeader = errors.New("natstransport: message init has nil header")
 
 type ServiceMessageHeader struct {
 	GatewayID   string                `msgpack:"gatewayID"`
@@ -187,8 +195,11 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	const messageWorkerCount = 32
 
 	workerCh := make(chan *nats.Msg, messageWorkerCount)
+	var workerWg sync.WaitGroup
+	workerWg.Add(messageWorkerCount)
 	for range messageWorkerCount {
 		go func() {
+			defer workerWg.Done()
 			for msg := range workerCh {
 				assembled, header, err := t.parseServiceMessage(msg)
 				if err != nil {
@@ -215,13 +226,27 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 	}()
 
 	t.mu.Lock()
+	// Capture any prior unbind so a re-bind without an intervening Unbind does
+	// not leak the old subscription and worker pool. The closure blocks on
+	// <-doneCh + workerWg.Wait(), so it must be invoked after releasing t.mu.
+	previousUnbind := t.unbindMessageService[serviceID]
 	t.unbindMessageService[serviceID] = func() error {
 		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
 		err := sub.Unsubscribe()
+		// Wait for the reader loop to exit (which closes workerCh) and then for
+		// all workers to drain any buffered/in-flight messages, preserving the
+		// pre-pool guarantee that unbind blocks until parse/handle work finishes.
 		<-doneCh
+		workerWg.Wait()
 		return err
 	}
 	t.mu.Unlock()
+
+	if previousUnbind != nil {
+		if err := previousUnbind(); err != nil {
+			transportNatsMessageDebug.Tracef("Failed to unbind previous message handler for service %s: %v", serviceID, err)
+		}
+	}
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
 	return nil
@@ -234,6 +259,10 @@ func (t *NatsTransport) parseServiceMessage(msg *nats.Msg) ([]byte, *ServiceMess
 		return nil, nil, err
 	}
 	header := init.Header
+	if header == nil {
+		transportNatsMessageDebug.Trace("Rejecting service message with nil header")
+		return nil, nil, errNilMessageHeader
+	}
 
 	transportNatsMessageDebug.Tracef("Received message header for socket %s", header.SocketID)
 
