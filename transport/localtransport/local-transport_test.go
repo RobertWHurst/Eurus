@@ -10,25 +10,27 @@ import (
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func waitReady(t *testing.T, ready <-chan struct{}) {
+// serve runs a subscription until the returned stop function is called.
+// Subscribe methods register synchronously, so the handler is live as soon as
+// this returns.
+func serve(t *testing.T, subscribeFn func(ctx context.Context) (eurus.Subscription, error)) (stop func()) {
 	t.Helper()
-	select {
-	case <-ready:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not become ready")
-	}
-}
-
-func cleanupHandler(t *testing.T, cancel context.CancelFunc, done <-chan error) {
-	t.Helper()
-	cancel()
-	select {
-	case err := <-done:
-		assert.NoError(t, err)
-	case <-time.After(time.Second):
-		t.Fatal("handler did not stop")
+	ctx, cancel := context.WithCancel(context.Background())
+	sub, err := subscribeFn(ctx)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- sub.Serve(ctx) }()
+	return func() {
+		cancel()
+		select {
+		case err := <-done:
+			assert.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("subscription did not stop")
+		}
 	}
 }
 
@@ -40,19 +42,15 @@ func TestLocalTransport_MessageService_DeliversMessageToHandler(t *testing.T) {
 	var receivedConnInfo *velaros.ConnectionInfo
 	var receivedMsg *velaros.SocketMessage
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleServiceMessages(ctx, ready, "service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceMessages(ctx, "service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 			receivedGatewayID = gatewayID
 			receivedSocketID = socketID
 			receivedConnInfo = connInfo
 			receivedMsg = msg
 		})
-	}()
-	waitReady(t, ready)
-	defer cleanupHandler(t, cancel, done)
+	})
+	defer stop()
 
 	headers := http.Header{"X-Test": []string{"value"}}
 	connInfo := &velaros.ConnectionInfo{
@@ -83,37 +81,24 @@ func TestLocalTransport_MessageService_HandlesNoHandler(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLocalTransport_HandleServiceMessages_RegistersHandler(t *testing.T) {
+func TestLocalTransport_SubscribeServiceMessages_RegistersHandler(t *testing.T) {
 	transport := New()
 
-	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleServiceMessages(ctx, ready, "service-1", handler)
-	}()
-	waitReady(t, ready)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceMessages(ctx, "service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {})
+	})
 
 	assert.NotNil(t, transport.serviceMessageHandlers["service-1"])
-	cleanupHandler(t, cancel, done)
+	stop()
 }
 
-func TestLocalTransport_HandleServiceMessages_RemovesHandlerOnCancel(t *testing.T) {
+func TestLocalTransport_SubscribeServiceMessages_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
-	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleServiceMessages(ctx, ready, "service-1", handler)
-	}()
-	waitReady(t, ready)
-
-	cleanupHandler(t, cancel, done)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceMessages(ctx, "service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {})
+	})
+	stop()
 
 	assert.Nil(t, transport.serviceMessageHandlers["service-1"])
 }
@@ -124,17 +109,13 @@ func TestLocalTransport_MessageGateway_DeliversMessageToHandler(t *testing.T) {
 	var receivedSocketID string
 	var receivedMsg *velaros.SocketMessage
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", func(socketID string, msg *velaros.SocketMessage) {
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeGatewayMessages(ctx, "gateway-1", func(socketID string, msg *velaros.SocketMessage) {
 			receivedSocketID = socketID
 			receivedMsg = msg
 		})
-	}()
-	waitReady(t, ready)
-	defer cleanupHandler(t, cancel, done)
+	})
+	defer stop()
 
 	err := transport.MessageGateway("gateway-1", "socket-1", &velaros.SocketMessage{
 		Type: websocket.MessageText,
@@ -158,35 +139,24 @@ func TestLocalTransport_MessageGateway_HandlesNoHandler(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLocalTransport_HandleGatewayMessages_RegistersHandler(t *testing.T) {
+func TestLocalTransport_SubscribeGatewayMessages_RegistersHandler(t *testing.T) {
 	transport := New()
 
-	handler := func(socketID string, msg *velaros.SocketMessage) {}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", handler)
-	}()
-	waitReady(t, ready)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeGatewayMessages(ctx, "gateway-1", func(socketID string, msg *velaros.SocketMessage) {})
+	})
 
 	assert.NotNil(t, transport.gatewayMessageHandlers["gateway-1"])
-	cleanupHandler(t, cancel, done)
+	stop()
 }
 
-func TestLocalTransport_HandleGatewayMessages_RemovesHandlerOnCancel(t *testing.T) {
+func TestLocalTransport_SubscribeGatewayMessages_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
-	handler := func(socketID string, msg *velaros.SocketMessage) {}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", handler)
-	}()
-	waitReady(t, ready)
-
-	cleanupHandler(t, cancel, done)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeGatewayMessages(ctx, "gateway-1", func(socketID string, msg *velaros.SocketMessage) {})
+	})
+	stop()
 
 	assert.Nil(t, transport.gatewayMessageHandlers["gateway-1"])
 }
@@ -198,18 +168,14 @@ func TestLocalTransport_ClosedSocket_NotifiesHandler(t *testing.T) {
 	var receivedStatus websocket.StatusCode
 	var receivedReason string
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleSocketClosures(ctx, ready, func(socketID string, status websocket.StatusCode, reason string) {
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketClosures(ctx, func(socketID string, status websocket.StatusCode, reason string) {
 			receivedSocketID = socketID
 			receivedStatus = status
 			receivedReason = reason
 		})
-	}()
-	waitReady(t, ready)
-	defer cleanupHandler(t, cancel, done)
+	})
+	defer stop()
 
 	err := transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "test reason")
 
@@ -224,26 +190,19 @@ func TestLocalTransport_ClosedSocket_NotifiesMultipleHandlers(t *testing.T) {
 
 	count := 0
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready1 := make(chan struct{}, 1)
-	done1 := make(chan error, 1)
-	go func() {
-		done1 <- transport.HandleSocketClosures(ctx, ready1, func(socketID string, status websocket.StatusCode, reason string) {
+	stop1 := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketClosures(ctx, func(socketID string, status websocket.StatusCode, reason string) {
 			count++
 		})
-	}()
-	waitReady(t, ready1)
+	})
+	defer stop1()
 
-	ready2 := make(chan struct{}, 1)
-	done2 := make(chan error, 1)
-	go func() {
-		done2 <- transport.HandleSocketClosures(ctx, ready2, func(socketID string, status websocket.StatusCode, reason string) {
+	stop2 := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketClosures(ctx, func(socketID string, status websocket.StatusCode, reason string) {
 			count++
 		})
-	}()
-	waitReady(t, ready2)
-	defer cleanupHandler(t, cancel, done1)
-	defer cleanupHandler(t, cancel, done2)
+	})
+	defer stop2()
 
 	err := transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "test reason")
 
@@ -251,35 +210,24 @@ func TestLocalTransport_ClosedSocket_NotifiesMultipleHandlers(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
-func TestLocalTransport_HandleSocketClosures_RegistersHandler(t *testing.T) {
+func TestLocalTransport_SubscribeSocketClosures_RegistersHandler(t *testing.T) {
 	transport := New()
 
-	handler := func(socketID string, status websocket.StatusCode, reason string) {}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleSocketClosures(ctx, ready, handler)
-	}()
-	waitReady(t, ready)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketClosures(ctx, func(socketID string, status websocket.StatusCode, reason string) {})
+	})
 
 	assert.Len(t, transport.socketClosedHandlers, 1)
-	cleanupHandler(t, cancel, done)
+	stop()
 }
 
-func TestLocalTransport_HandleSocketClosures_RemovesHandlerOnCancel(t *testing.T) {
+func TestLocalTransport_SubscribeSocketClosures_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
-	handler := func(socketID string, status websocket.StatusCode, reason string) {}
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleSocketClosures(ctx, ready, handler)
-	}()
-	waitReady(t, ready)
-
-	cleanupHandler(t, cancel, done)
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketClosures(ctx, func(socketID string, status websocket.StatusCode, reason string) {})
+	})
+	stop()
 
 	assert.Len(t, transport.socketClosedHandlers, 0)
 }
@@ -295,16 +243,12 @@ func TestLocalTransport_AnnounceGateway_NotifiesHandler(t *testing.T) {
 
 	var receivedDescriptor *eurus.GatewayDescriptor
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleGatewayAnnouncements(ctx, ready, func(descriptor *eurus.GatewayDescriptor) {
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeGatewayAnnouncements(ctx, func(descriptor *eurus.GatewayDescriptor) {
 			receivedDescriptor = descriptor
 		})
-	}()
-	waitReady(t, ready)
-	defer cleanupHandler(t, cancel, done)
+	})
+	defer stop()
 
 	descriptor := &eurus.GatewayDescriptor{
 		Name: "gateway-1",
@@ -321,16 +265,12 @@ func TestLocalTransport_AnnounceService_NotifiesHandler(t *testing.T) {
 
 	var receivedDescriptor *eurus.ServiceDescriptor
 
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleServiceAnnouncements(ctx, ready, func(descriptor *eurus.ServiceDescriptor) {
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceAnnouncements(ctx, func(descriptor *eurus.ServiceDescriptor) {
 			receivedDescriptor = descriptor
 		})
-	}()
-	waitReady(t, ready)
-	defer cleanupHandler(t, cancel, done)
+	})
+	defer stop()
 
 	descriptor := &eurus.ServiceDescriptor{
 		Name: "service-1",
@@ -341,4 +281,34 @@ func TestLocalTransport_AnnounceService_NotifiesHandler(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Equal(t, descriptor, receivedDescriptor)
+}
+
+func TestLocalTransport_HeartbeatSockets_ReturnsDeadSockets(t *testing.T) {
+	transport := New()
+
+	stop := serve(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketHeartbeats(ctx, "gateway-1", func(serviceID string, socketIDs []string) []string {
+			var dead []string
+			for _, socketID := range socketIDs {
+				if socketID != "alive-socket" {
+					dead = append(dead, socketID)
+				}
+			}
+			return dead
+		})
+	})
+	defer stop()
+
+	dead, err := transport.HeartbeatSockets("gateway-1", "service-1", []string{"alive-socket", "dead-socket-1", "dead-socket-2"})
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"dead-socket-1", "dead-socket-2"}, dead)
+}
+
+func TestLocalTransport_HeartbeatSockets_ErrorsWhenGatewayUnavailable(t *testing.T) {
+	transport := New()
+
+	_, err := transport.HeartbeatSockets("gateway-1", "service-1", []string{"socket-1"})
+
+	assert.Error(t, err)
 }

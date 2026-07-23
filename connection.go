@@ -33,8 +33,15 @@ type Connection struct {
 
 var _ velaros.SocketConnection = &Connection{}
 
-func NewConnection(transport Transport, gatewayID, socketID string, info *velaros.ConnectionInfo, onClosed func()) *Connection {
+// NewConnection creates a connection with a mailbox buffering up to
+// mailboxSize inbound messages. When the mailbox is full HandleMessage blocks,
+// applying backpressure to the transport's per-socket dispatch queue.
+func NewConnection(transport Transport, gatewayID, socketID string, info *velaros.ConnectionInfo, mailboxSize int, onClosed func()) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	if mailboxSize < 0 {
+		mailboxSize = 0
+	}
 
 	return &Connection{
 		transport:   transport,
@@ -42,7 +49,7 @@ func NewConnection(transport Transport, gatewayID, socketID string, info *velaro
 		socketID:    socketID,
 		headers:     info.Headers,
 		remoteAttr:  info.RemoteAddr,
-		messageChan: make(chan *velaros.SocketMessage),
+		messageChan: make(chan *velaros.SocketMessage, mailboxSize),
 
 		onClosed:  onClosed,
 		ctxCancel: cancel,

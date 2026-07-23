@@ -497,7 +497,7 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, 0, func() {})
 
 	// Stop service (should not panic)
 	service.Close()
@@ -529,7 +529,7 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Create a connection
-	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
+	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, 0, func() {})
 
 	// Stop gateway
 	gateway.Close()
@@ -557,7 +557,7 @@ func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	connectionClosed := false
 
 	// Create a connection targeting a gateway ID that has no handler bound
-	conn := eurus.NewConnection(transport, "nonexistent-gateway", "socket-1", &velaros.ConnectionInfo{}, func() {
+	conn := eurus.NewConnection(transport, "nonexistent-gateway", "socket-1", &velaros.ConnectionInfo{}, 0, func() {
 		cleanupCalled = true
 		connectionClosed = true
 	})
@@ -852,20 +852,13 @@ func TestService_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	require.NoError(t, err)
 
 	var heartbeatsReceived atomic.Int64
-	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
-	heartbeatReady := make(chan struct{}, 1)
-	heartbeatDone := make(chan error, 1)
-	go func() {
-		heartbeatDone <- transport.HandleSocketHeartbeats(heartbeatCtx, heartbeatReady, gateway.ID, func(serviceID string, socketID string) bool {
-			heartbeatsReceived.Add(1)
-			return true
+	stopHeartbeats := serveStream(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeSocketHeartbeats(ctx, gateway.ID, func(serviceID string, socketIDs []string) []string {
+			heartbeatsReceived.Add(int64(len(socketIDs)))
+			return nil
 		})
-	}()
-	<-heartbeatReady
-	defer func() {
-		heartbeatCancel()
-		require.NoError(t, <-heartbeatDone)
-	}()
+	})
+	defer stopHeartbeats()
 
 	time.Sleep(120 * time.Millisecond)
 	countBeforeStop := heartbeatsReceived.Load()
@@ -901,7 +894,7 @@ func TestGateway_ProtectedMapDeletion_NoRace(t *testing.T) {
 	// Concurrent heartbeats (from a dummy service to the gateway)
 	go func() {
 		for i := 0; i < 50; i++ {
-			transport.HeartbeatSocket(gateway.ID, "dummy-service", "socket-race")
+			transport.HeartbeatSockets(gateway.ID, "dummy-service", []string{"socket-race"})
 			time.Sleep(2 * time.Millisecond)
 		}
 		done <- true

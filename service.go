@@ -9,6 +9,7 @@ import (
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/telemetryos/go-debug/debug"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -21,6 +22,11 @@ var (
 	ServicePruneInterval = 10 * time.Second
 	ClosedSocketTTL      = 30 * time.Second
 	HeartbeatInterval    = 5 * time.Second
+
+	// ConnectionMailboxSize is the default number of inbound messages buffered
+	// per connection before HandleMessage applies backpressure to the
+	// transport's per-socket dispatch queue.
+	ConnectionMailboxSize = 64
 )
 
 type routeDescriptorProvider interface {
@@ -76,10 +82,9 @@ type Service struct {
 	PruneInterval     time.Duration
 	ClosedSocketTTL   time.Duration
 	HeartbeatInterval time.Duration
+	MailboxSize       int
 
-	lifecycleMu   sync.Mutex
-	closeCancel   context.CancelFunc
-	lifecycleDone chan struct{}
+	lifecycle lifecycle
 }
 
 // NewService creates a new service with the given name, connection, and handler.
@@ -105,138 +110,119 @@ func NewService(name string, transport Transport, handler any) *Service {
 		PruneInterval:     ServicePruneInterval,
 		ClosedSocketTTL:   ClosedSocketTTL,
 		HeartbeatInterval: HeartbeatInterval,
+		MailboxSize:       ConnectionMailboxSize,
 	}
 }
 
-// Listen starts the service and blocks until the context is canceled, Close is
-// called, or a required transport stream fails.
+// Listen starts the service and blocks until the context is canceled, Close
+// is called, or a transport stream fails. A service may listen again after a
+// clean shutdown.
 func (s *Service) Listen(ctx context.Context) error {
 	serviceDebug.Tracef("Listening as service %s", s.Name)
+
 	if s.Transport == nil {
 		serviceDebug.Trace("Transport not provided")
-		return fmt.Errorf(
-			"cannot listen as local service. The associated gateway already handles " +
-				"incoming requests",
-		)
+		return ErrNoTransport
 	}
 
-	listenCtx, cancel := context.WithCancel(ctx)
-	if err := s.setCloseCancel(cancel); err != nil {
-		cancel()
+	listenCtx, err := s.lifecycle.begin(ctx, ErrServiceAlreadyListening)
+	if err != nil {
+		serviceDebug.Trace("Service already listening")
 		return err
 	}
-	defer close(s.lifecycleDone)
-	defer s.clearCloseCancel()
-	defer cancel()
+	defer s.lifecycle.end()
 	defer s.closeAllConnections()
 
-	ready := make(chan struct{}, 3)
-	errCh := make(chan error, 5)
-	var wg sync.WaitGroup
-	goRun := func(name string, fn func() error) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := fn(); err != nil {
-				select {
-				case errCh <- fmt.Errorf("%s: %w", name, err):
-				case <-listenCtx.Done():
-				}
-			}
-		}()
-	}
-
-	goRun("gateway announcements", func() error {
-		return s.Transport.HandleGatewayAnnouncements(listenCtx, ready, func(gatewayDescriptor *GatewayDescriptor) {
-			s.handleGatewayAnnounce(listenCtx, gatewayDescriptor)
-		})
-	})
-	goRun("service messages", func() error {
-		return s.Transport.HandleServiceMessages(listenCtx, ready, s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
-			serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
-			connection := s.ensureConnection(gatewayID, socketID, connInfo)
-			if connection == nil {
-				serviceHandleDebug.Tracef("Dropping message for recently closed socket %s", socketID)
-				return
-			}
-			connection.HandleMessage(msg)
-		})
-	})
-	goRun("socket closures", func() error {
-		return s.Transport.HandleSocketClosures(listenCtx, ready, func(socketID string, status velaros.Status, reason string) {
-			serviceHandleDebug.Tracef("Handling close for socket %s", socketID)
-			s.closeConnection(socketID, status, reason)
-		})
-	})
-	goRun("prune loop", func() error {
-		s.pruneLoop(listenCtx)
-		return nil
-	})
-	goRun("heartbeat loop", func() error {
-		s.heartbeatLoop(listenCtx)
-		return nil
-	})
-
-	for i := 0; i < 3; i++ {
-		select {
-		case <-ready:
-		case err := <-errCh:
-			cancel()
-			wg.Wait()
-			return err
-		case <-listenCtx.Done():
-			cancel()
-			wg.Wait()
-			return nil
+	grp, grpCtx := errgroup.WithContext(listenCtx)
+	finish := func(err error) error {
+		s.lifecycle.interrupt()
+		if waitErr := grp.Wait(); waitErr != nil && err == nil {
+			err = waitErr
 		}
+		return err
 	}
+
+	streams := []struct {
+		name      string
+		subscribe func(context.Context) (Subscription, error)
+	}{
+		{"gateway announcements", func(ctx context.Context) (Subscription, error) {
+			return s.Transport.SubscribeGatewayAnnouncements(ctx, s.handleGatewayAnnounce)
+		}},
+		{"service messages", func(ctx context.Context) (Subscription, error) {
+			return s.Transport.SubscribeServiceMessages(ctx, s.ID, s.handleServiceMessage)
+		}},
+		{"socket closures", func(ctx context.Context) (Subscription, error) {
+			return s.Transport.SubscribeSocketClosures(ctx, func(socketID string, status velaros.Status, reason string) {
+				serviceHandleDebug.Tracef("Handling close for socket %s", socketID)
+				s.closeConnection(socketID, status, reason)
+			})
+		}},
+	}
+	for _, stream := range streams {
+		sub, err := stream.subscribe(grpCtx)
+		if err != nil {
+			return finish(fmt.Errorf("%s: %w", stream.name, err))
+		}
+		name := stream.name
+		grp.Go(func() error {
+			if err := sub.Serve(grpCtx); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			return nil
+		})
+	}
+
+	grp.Go(func() error {
+		s.pruneLoop(grpCtx)
+		return nil
+	})
+	grp.Go(func() error {
+		s.heartbeatLoop(grpCtx)
+		return nil
+	})
 
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
-		cancel()
-		wg.Wait()
 		serviceDebug.Tracef("Failed to announce service: %v", err)
-		return err
+		return finish(err)
 	}
 
-	select {
-	case err := <-errCh:
-		cancel()
-		wg.Wait()
-		return err
-	case <-listenCtx.Done():
-		cancel()
-		wg.Wait()
-		return nil
-	}
+	s.lifecycle.markReady()
+	return finish(grp.Wait())
 }
 
-// Close interrupts a running Listen call. It is safe to call multiple times.
+// Close interrupts a running Listen call and waits for it to return. It is
+// safe to call multiple times, and is a no-op when the service is not
+// listening.
 func (s *Service) Close() error {
-	s.lifecycleMu.Lock()
-	cancel := s.closeCancel
-	done := s.lifecycleDone
-	s.lifecycleMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if done != nil {
-		<-done
-	}
+	serviceDebug.Tracef("Closing service %s", s.Name)
+	s.lifecycle.close()
 	return nil
 }
 
-func (s *Service) handleGatewayAnnounce(ctx context.Context, gatewayDescriptor *GatewayDescriptor) {
-	serviceAnnounceDebug.Tracef("Received gateway announcement from %s", gatewayDescriptor.Name)
-	if ctx.Err() != nil {
+// Ready returns a channel that is closed once the current Listen call has
+// subscribed its transport streams and announced the service. It is intended
+// for startup sequencing and readiness probes.
+func (s *Service) Ready() <-chan struct{} {
+	return s.lifecycle.readyChan()
+}
+
+func (s *Service) handleServiceMessage(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+	serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
+	connection := s.ensureConnection(gatewayID, socketID, connInfo)
+	if connection == nil {
+		serviceHandleDebug.Tracef("Dropping message for recently closed socket %s", socketID)
 		return
 	}
-	isWantedGateway := len(s.GatewayNames) == 0
-	if !isWantedGateway {
-		if slices.Contains(s.GatewayNames, gatewayDescriptor.Name) {
-			isWantedGateway = true
-		}
-	}
+	connection.HandleMessage(msg)
+}
+
+func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
+	serviceAnnounceDebug.Tracef("Received gateway announcement from %s", gatewayDescriptor.Name)
+
+	isWantedGateway := len(s.GatewayNames) == 0 ||
+		slices.Contains(s.GatewayNames, gatewayDescriptor.Name)
 	if !isWantedGateway {
 		serviceAnnounceDebug.Tracef("Ignoring announcement from unwanted gateway %s", gatewayDescriptor.Name)
 		return
@@ -307,7 +293,7 @@ func (s *Service) ensureConnection(gatewayID, socketID string, info *velaros.Con
 		return connection
 	}
 
-	connection := NewConnection(s.Transport, gatewayID, socketID, info, func() {
+	connection := NewConnection(s.Transport, gatewayID, socketID, info, s.MailboxSize, func() {
 		s.connectionsMu.Lock()
 		delete(s.connections, socketID)
 		s.connectionsMu.Unlock()
@@ -337,7 +323,7 @@ func (s *Service) closeAllConnections() {
 	for _, c := range s.connections {
 		connections = append(connections, c)
 	}
-	s.connections = make(map[string]*Connection)
+	s.connections = map[string]*Connection{}
 	s.connectionsMu.Unlock()
 
 	for _, c := range connections {
@@ -380,44 +366,35 @@ func (s *Service) heartbeatLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.connectionsMu.Lock()
-			type entry struct {
-				gatewayID string
-				socketID  string
-			}
-			var entries []entry
-			for socketID, conn := range s.connections {
-				entries = append(entries, entry{conn.GatewayID(), socketID})
-			}
-			s.connectionsMu.Unlock()
-
-			for _, e := range entries {
-				if err := s.Transport.HeartbeatSocket(e.gatewayID, s.ID, e.socketID); err != nil {
-					serviceHandleDebug.Tracef("No heartbeat response for socket %s from gateway %s: %v, closing", e.socketID, e.gatewayID, err)
-					s.closeConnection(e.socketID, velaros.StatusGoingAway, "No heartbeat response")
-					if err := s.Transport.ClosedSocket(e.socketID, velaros.StatusGoingAway, "No heartbeat response"); err != nil {
-						serviceHandleDebug.Tracef("Error notifying closed socket %s: %v", e.socketID, err)
-					}
-				}
-			}
+			s.heartbeatConnections()
 		}
 	}
 }
 
-func (s *Service) setCloseCancel(cancel context.CancelFunc) error {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.closeCancel != nil {
-		return fmt.Errorf("service already listening")
+// heartbeatConnections sends one batched heartbeat per gateway covering all
+// of that gateway's sockets, and closes any connections the gateway no
+// longer recognizes.
+func (s *Service) heartbeatConnections() {
+	s.connectionsMu.Lock()
+	socketIDsByGateway := map[string][]string{}
+	for socketID, connection := range s.connections {
+		gatewayID := connection.GatewayID()
+		socketIDsByGateway[gatewayID] = append(socketIDsByGateway[gatewayID], socketID)
 	}
-	s.closeCancel = cancel
-	s.lifecycleDone = make(chan struct{})
-	return nil
-}
+	s.connectionsMu.Unlock()
 
-func (s *Service) clearCloseCancel() {
-	s.lifecycleMu.Lock()
-	s.closeCancel = nil
-	s.lifecycleDone = nil
-	s.lifecycleMu.Unlock()
+	for gatewayID, socketIDs := range socketIDsByGateway {
+		dead, err := s.Transport.HeartbeatSockets(gatewayID, s.ID, socketIDs)
+		if err != nil {
+			serviceHandleDebug.Tracef("Gateway %s unreachable for heartbeat: %v, closing its %d connections", gatewayID, err, len(socketIDs))
+			dead = socketIDs
+		}
+		for _, socketID := range dead {
+			serviceHandleDebug.Tracef("No heartbeat for socket %s from gateway %s, closing", socketID, gatewayID)
+			s.closeConnection(socketID, velaros.StatusGoingAway, "No heartbeat response")
+			if err := s.Transport.ClosedSocket(socketID, velaros.StatusGoingAway, "No heartbeat response"); err != nil {
+				serviceHandleDebug.Tracef("Error notifying closed socket %s: %v", socketID, err)
+			}
+		}
+	}
 }

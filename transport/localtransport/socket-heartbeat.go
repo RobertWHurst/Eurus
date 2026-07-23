@@ -3,42 +3,38 @@ package localtransport
 import (
 	"context"
 	"fmt"
+
+	"github.com/RobertWHurst/eurus"
 )
 
-// HeartbeatSocket sends a heartbeat from a service to a gateway for the given socket.
-// Returns nil if the gateway confirms the socket is alive, or an error if the socket
-// is not found or the gateway is unavailable.
-func (t *LocalTransport) HeartbeatSocket(gatewayID string, serviceID string, socketID string) error {
-	transportLocalMessageDebug.Tracef("Sending socket heartbeat from service %s to gateway %s for socket %s", serviceID, gatewayID, socketID)
+// HeartbeatSockets asks a gateway which of the given sockets are no longer
+// alive, and returns their IDs. An error indicates the gateway is unavailable.
+func (t *LocalTransport) HeartbeatSockets(gatewayID string, serviceID string, socketIDs []string) ([]string, error) {
+	transportLocalMessageDebug.Tracef("Heartbeating %d sockets from service %s to gateway %s", len(socketIDs), serviceID, gatewayID)
 
 	t.mu.RLock()
 	handler, ok := t.socketHeartbeatHandlers[gatewayID]
 	t.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("gateway %s not available", gatewayID)
+		return nil, fmt.Errorf("gateway %s not available", gatewayID)
 	}
 
-	if !handler(serviceID, socketID) {
-		return fmt.Errorf("socket %s not found in gateway %s", socketID, gatewayID)
-	}
-
-	return nil
+	return handler(serviceID, socketIDs), nil
 }
 
-// HandleSocketHeartbeats handles heartbeat requests targeted at a gateway.
-// The handler should return true if the socket is alive, false if it is not.
-func (t *LocalTransport) HandleSocketHeartbeats(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(serviceID string, socketID string) bool) error {
-	transportLocalMessageDebug.Tracef("Handling socket heartbeats for gateway %s", gatewayID)
+// SubscribeSocketHeartbeats subscribes a gateway to heartbeat requests. The
+// handler returns the subset of socketIDs that are no longer alive.
+func (t *LocalTransport) SubscribeSocketHeartbeats(_ context.Context, gatewayID string, handler func(serviceID string, socketIDs []string) []string) (eurus.Subscription, error) {
+	transportLocalMessageDebug.Tracef("Subscribing to socket heartbeats for gateway %s", gatewayID)
 	t.mu.Lock()
 	t.socketHeartbeatHandlers[gatewayID] = handler
 	t.mu.Unlock()
-	signalReady(ready)
 
-	<-ctx.Done()
-	transportLocalMessageDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
-	t.mu.Lock()
-	delete(t.socketHeartbeatHandlers, gatewayID)
-	t.mu.Unlock()
-	return nil
+	return untilDone(func() {
+		transportLocalMessageDebug.Tracef("Unsubscribing from socket heartbeats for gateway %s", gatewayID)
+		t.mu.Lock()
+		delete(t.socketHeartbeatHandlers, gatewayID)
+		t.mu.Unlock()
+	}), nil
 }

@@ -6,43 +6,36 @@ import (
 	"github.com/RobertWHurst/eurus"
 )
 
-func (c *LocalTransport) AnnounceService(serviceDescriptor *eurus.ServiceDescriptor) error {
+func (t *LocalTransport) AnnounceService(serviceDescriptor *eurus.ServiceDescriptor) error {
 	transportLocalAnnounceDebug.Tracef("Announcing service %s with %d routes",
 		serviceDescriptor.Name, len(serviceDescriptor.RouteDescriptors))
 
-	c.mu.RLock()
-	handlerCount := len(c.serviceAnnounceHandlers)
-	handlers := make([]func(serviceDescriptor *eurus.ServiceDescriptor), 0, len(c.serviceAnnounceHandlers))
-	for _, handler := range c.serviceAnnounceHandlers {
+	t.mu.RLock()
+	handlers := make([]func(serviceDescriptor *eurus.ServiceDescriptor), 0, len(t.serviceAnnounceHandlers))
+	for _, handler := range t.serviceAnnounceHandlers {
 		handlers = append(handlers, handler)
 	}
-	c.mu.RUnlock()
+	t.mu.RUnlock()
 
-	transportLocalAnnounceDebug.Tracef("Notifying %d service announcement handlers", handlerCount)
-
+	transportLocalAnnounceDebug.Tracef("Notifying %d service announcement handlers", len(handlers))
 	for _, handler := range handlers {
 		handler(serviceDescriptor)
 	}
 
-	transportLocalAnnounceDebug.Trace("Service announcement completed")
 	return nil
 }
 
-func (c *LocalTransport) HandleServiceAnnouncements(ctx context.Context, ready chan<- struct{}, handler func(serviceDescriptor *eurus.ServiceDescriptor)) error {
-	transportLocalAnnounceDebug.Trace("Handling service announcements")
-	c.mu.Lock()
-	id := c.registerHandler()
-	c.serviceAnnounceHandlers[id] = handler
-	handlerCount := len(c.serviceAnnounceHandlers)
-	c.mu.Unlock()
-	transportLocalAnnounceDebug.Tracef("Now have %d service announcement handlers", handlerCount)
-	signalReady(ready)
+func (t *LocalTransport) SubscribeServiceAnnouncements(_ context.Context, handler func(serviceDescriptor *eurus.ServiceDescriptor)) (eurus.Subscription, error) {
+	transportLocalAnnounceDebug.Trace("Subscribing to service announcements")
+	t.mu.Lock()
+	id := t.registerHandlerID()
+	t.serviceAnnounceHandlers[id] = handler
+	t.mu.Unlock()
 
-	<-ctx.Done()
-	c.mu.Lock()
-	handlerCount = len(c.serviceAnnounceHandlers)
-	delete(c.serviceAnnounceHandlers, id)
-	c.mu.Unlock()
-	transportLocalAnnounceDebug.Tracef("Unbinding %d service announcement handlers", handlerCount)
-	return nil
+	return untilDone(func() {
+		transportLocalAnnounceDebug.Trace("Unsubscribing from service announcements")
+		t.mu.Lock()
+		delete(t.serviceAnnounceHandlers, id)
+		t.mu.Unlock()
+	}), nil
 }

@@ -2,10 +2,9 @@ package natstransport
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"time"
 
+	"github.com/RobertWHurst/eurus"
 	"github.com/nats-io/nats.go"
 	"github.com/telemetryos/go-debug/debug"
 	"github.com/vmihailenco/msgpack/v5"
@@ -17,95 +16,80 @@ var (
 
 const heartbeatRequestTimeout = 5 * time.Second
 
+// heartbeatMaxBatchSize bounds how many socket IDs travel in one heartbeat
+// request so envelopes stay well under the NATS payload limit.
+const heartbeatMaxBatchSize = 4096
+
 type SocketHeartbeatEnvelope struct {
-	ServiceID string `msgpack:"serviceID"`
-	SocketID  string `msgpack:"socketID"`
+	ServiceID string   `msgpack:"serviceID"`
+	SocketIDs []string `msgpack:"socketIDs"`
 }
 
 type SocketHeartbeatReply struct {
-	Alive bool `msgpack:"alive"`
+	DeadSocketIDs []string `msgpack:"deadSocketIDs"`
 }
 
-// HeartbeatSocket sends a heartbeat request from a service to a gateway for the given socket.
-// Returns nil if the gateway confirms the socket is alive, or an error if the socket
-// is not found, the gateway is unavailable, or the request times out.
-func (t *NatsTransport) HeartbeatSocket(gatewayID string, serviceID string, socketID string) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Sending socket heartbeat from service %s to gateway %s for socket %s", serviceID, gatewayID, socketID)
+// HeartbeatSockets asks a gateway which of the given sockets are no longer
+// alive, and returns their IDs. Large socket sets are split into batches; an
+// error on any batch aborts and indicates the gateway is unreachable.
+func (t *NatsTransport) HeartbeatSockets(gatewayID string, serviceID string, socketIDs []string) ([]string, error) {
+	if len(socketIDs) == 0 {
+		return nil, nil
+	}
+	transportNatsSocketHeartbeatDebug.Tracef("Heartbeating %d sockets from service %s to gateway %s", len(socketIDs), serviceID, gatewayID)
 
 	subject := namespace("gateway", gatewayID, "socket-heartbeat")
 
-	envelope := &SocketHeartbeatEnvelope{
-		ServiceID: serviceID,
-		SocketID:  socketID,
+	var dead []string
+	for start := 0; start < len(socketIDs); start += heartbeatMaxBatchSize {
+		end := min(start+heartbeatMaxBatchSize, len(socketIDs))
+
+		envelopeBytes, err := msgpack.Marshal(&SocketHeartbeatEnvelope{
+			ServiceID: serviceID,
+			SocketIDs: socketIDs[start:end],
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		replyMsg, err := t.NatsConnection.Request(subject, envelopeBytes, heartbeatRequestTimeout)
+		if err != nil {
+			transportNatsSocketHeartbeatDebug.Tracef("Heartbeat request to gateway %s failed: %v", gatewayID, err)
+			return nil, err
+		}
+
+		reply := &SocketHeartbeatReply{}
+		if err := msgpack.Unmarshal(replyMsg.Data, reply); err != nil {
+			return nil, err
+		}
+		dead = append(dead, reply.DeadSocketIDs...)
 	}
 
-	envelopeBytes, err := msgpack.Marshal(envelope)
-	if err != nil {
-		transportNatsSocketHeartbeatDebug.Tracef("Failed to marshal envelope: %v", err)
-		return err
-	}
-
-	replyMsg, err := t.NatsConnection.Request(subject, envelopeBytes, heartbeatRequestTimeout)
-	if err != nil {
-		transportNatsSocketHeartbeatDebug.Tracef("Heartbeat request failed for socket %s: %v", socketID, err)
-		return err
-	}
-
-	reply := &SocketHeartbeatReply{}
-	if err := msgpack.Unmarshal(replyMsg.Data, reply); err != nil {
-		transportNatsSocketHeartbeatDebug.Tracef("Failed to unmarshal reply: %v", err)
-		return err
-	}
-
-	if !reply.Alive {
-		return fmt.Errorf("socket %s not found in gateway %s", socketID, gatewayID)
-	}
-
-	return nil
+	return dead, nil
 }
 
-// HandleSocketHeartbeats handles heartbeat requests for a gateway.
-// The handler should return true if the socket is alive, false if it is not.
-func (t *NatsTransport) HandleSocketHeartbeats(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(serviceID string, socketID string) bool) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Handling socket heartbeats for gateway %s", gatewayID)
+// SubscribeSocketHeartbeats subscribes a gateway to heartbeat requests. The
+// handler returns the subset of socketIDs that are no longer alive.
+func (t *NatsTransport) SubscribeSocketHeartbeats(ctx context.Context, gatewayID string, handler func(serviceID string, socketIDs []string) []string) (eurus.Subscription, error) {
+	transportNatsSocketHeartbeatDebug.Tracef("Subscribing to socket heartbeats for gateway %s", gatewayID)
 
 	subject := namespace("gateway", gatewayID, "socket-heartbeat")
-
-	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
+	return t.subscribeAsync(ctx, subject, func(msg *nats.Msg) {
 		envelope := &SocketHeartbeatEnvelope{}
 		if err := msgpack.Unmarshal(msg.Data, envelope); err != nil {
-			transportNatsSocketHeartbeatDebug.Tracef("Failed to unmarshal envelope: %v", err)
+			transportNatsSocketHeartbeatDebug.Tracef("Discarding malformed heartbeat request: %v", err)
 			return
 		}
 
-		alive := handler(envelope.ServiceID, envelope.SocketID)
+		dead := handler(envelope.ServiceID, envelope.SocketIDs)
 
-		replyBytes, err := msgpack.Marshal(&SocketHeartbeatReply{Alive: alive})
+		replyBytes, err := msgpack.Marshal(&SocketHeartbeatReply{DeadSocketIDs: dead})
 		if err != nil {
 			transportNatsSocketHeartbeatDebug.Tracef("Failed to marshal reply: %v", err)
 			return
 		}
-
 		if err := msg.Respond(replyBytes); err != nil {
 			transportNatsSocketHeartbeatDebug.Tracef("Failed to send reply: %v", err)
 		}
 	})
-
-	if err != nil {
-		transportNatsSocketHeartbeatDebug.Tracef("Failed to subscribe: %v", err)
-		return err
-	}
-	defer sub.Unsubscribe()
-
-	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	}
-
-	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for gateway %s", gatewayID)
-	signalReady(ready)
-	<-ctx.Done()
-	return nil
 }

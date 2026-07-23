@@ -2,8 +2,8 @@ package natstransport
 
 import (
 	"context"
-	"errors"
 
+	"github.com/RobertWHurst/eurus"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/telemetryos/go-debug/debug"
@@ -25,63 +25,37 @@ func (t *NatsTransport) ClosedSocket(socketID string, status websocket.StatusCod
 	transportNatsSocketClosedDebug.Tracef("Broadcasting socket closed: %s (status: %d, reason: %s)",
 		socketID, status, reason)
 
-	subject := namespace("socket", "closed")
-
-	envelope := &SocketClosedEnvelope{
+	envelopeBytes, err := msgpack.Marshal(&SocketClosedEnvelope{
 		SocketID: socketID,
 		Status:   status,
 		Reason:   reason,
-	}
-
-	envelopeBytes, err := msgpack.Marshal(envelope)
+	})
 	if err != nil {
 		transportNatsSocketClosedDebug.Tracef("Failed to marshal envelope: %v", err)
 		return err
 	}
 
-	if err := t.NatsConnection.Publish(subject, envelopeBytes); err != nil {
+	if err := t.NatsConnection.Publish(namespace("socket", "closed"), envelopeBytes); err != nil {
 		transportNatsSocketClosedDebug.Tracef("Failed to publish: %v", err)
 		return err
 	}
 
-	transportNatsSocketClosedDebug.Trace("Socket closed broadcast sent successfully")
 	return nil
 }
 
-// HandleSocketClosures handles socket closed events until ctx is canceled.
-func (t *NatsTransport) HandleSocketClosures(ctx context.Context, ready chan<- struct{}, handler func(socketID string, status websocket.StatusCode, reason string)) error {
-	transportNatsSocketClosedDebug.Trace("Handling socket closures")
+// SubscribeSocketClosures subscribes to socket closure broadcasts.
+func (t *NatsTransport) SubscribeSocketClosures(ctx context.Context, handler func(socketID string, status websocket.StatusCode, reason string)) (eurus.Subscription, error) {
+	transportNatsSocketClosedDebug.Trace("Subscribing to socket closures")
 
-	subject := namespace("socket", "closed")
-
-	sub, err := t.NatsConnection.Subscribe(subject, func(msg *nats.Msg) {
+	return t.subscribeAsync(ctx, namespace("socket", "closed"), func(msg *nats.Msg) {
 		envelope := &SocketClosedEnvelope{}
 		if err := msgpack.Unmarshal(msg.Data, envelope); err != nil {
-			transportNatsSocketClosedDebug.Tracef("Failed to unmarshal envelope: %v", err)
+			transportNatsSocketClosedDebug.Tracef("Discarding malformed socket closure: %v", err)
 			return
 		}
 
 		transportNatsSocketClosedDebug.Tracef("Received socket closed event for %s (status: %d, reason: %s)",
 			envelope.SocketID, envelope.Status, envelope.Reason)
-
 		handler(envelope.SocketID, envelope.Status, envelope.Reason)
 	})
-
-	if err != nil {
-		transportNatsSocketClosedDebug.Tracef("Failed to subscribe: %v", err)
-		return err
-	}
-	defer sub.Unsubscribe()
-
-	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
-		return err
-	}
-
-	transportNatsSocketClosedDebug.Trace("Socket closed handler bound successfully")
-	signalReady(ready)
-	<-ctx.Done()
-	return nil
 }

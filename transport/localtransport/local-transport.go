@@ -1,6 +1,7 @@
 package localtransport
 
 import (
+	"context"
 	"sync"
 
 	"github.com/RobertWHurst/eurus"
@@ -15,6 +16,9 @@ var (
 	transportLocalAnnounceDebug = debug.Bind("eurus:transport:local:announce")
 )
 
+// LocalTransport is an in-process transport for development and testing.
+// Handlers run synchronously on the caller's goroutine, so unlike the NATS
+// transport it provides no cross-socket dispatch concurrency.
 type LocalTransport struct {
 	mu                      sync.RWMutex
 	nextHandlerID           uint64
@@ -23,7 +27,7 @@ type LocalTransport struct {
 	serviceMessageHandlers  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)
 	gatewayMessageHandlers  map[string]func(socketID string, msg *velaros.SocketMessage)
 	socketClosedHandlers    map[uint64]func(socketID string, status websocket.StatusCode, reason string)
-	socketHeartbeatHandlers map[string]func(serviceID string, socketID string) bool
+	socketHeartbeatHandlers map[string]func(serviceID string, socketIDs []string) []string
 }
 
 var _ eurus.Transport = &LocalTransport{}
@@ -36,21 +40,22 @@ func New() *LocalTransport {
 		serviceMessageHandlers:  map[string]func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage){},
 		gatewayMessageHandlers:  map[string]func(socketID string, msg *velaros.SocketMessage){},
 		socketClosedHandlers:    map[uint64]func(socketID string, status websocket.StatusCode, reason string){},
-		socketHeartbeatHandlers: map[string]func(serviceID string, socketID string) bool{},
+		socketHeartbeatHandlers: map[string]func(serviceID string, socketIDs []string) []string{},
 	}
 }
 
-func (c *LocalTransport) registerHandler() uint64 {
-	c.nextHandlerID++
-	return c.nextHandlerID
+// registerHandlerID must be called with t.mu held.
+func (t *LocalTransport) registerHandlerID() uint64 {
+	t.nextHandlerID++
+	return t.nextHandlerID
 }
 
-func signalReady(ready chan<- struct{}) {
-	if ready == nil {
-		return
-	}
-	select {
-	case ready <- struct{}{}:
-	default:
-	}
+// untilDone returns a Subscription that blocks until the serve context is
+// canceled, then runs unregister.
+func untilDone(unregister func()) eurus.Subscription {
+	return eurus.SubscriptionFunc(func(ctx context.Context) error {
+		<-ctx.Done()
+		unregister()
+		return nil
+	})
 }

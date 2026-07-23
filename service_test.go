@@ -19,26 +19,19 @@ func TestServiceReannouncesWhenGatewayHasOnlyOtherInstanceWithSameName(t *testin
 	transport := localtransport.New()
 
 	var matchingAnnouncements atomic.Int64
-	var serviceID string
-	announceCtx, announceCancel := context.WithCancel(context.Background())
-	defer announceCancel()
-	ready := make(chan struct{}, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- transport.HandleServiceAnnouncements(announceCtx, ready, func(serviceDescriptor *eurus.ServiceDescriptor) {
-			if serviceDescriptor.ID == serviceID {
+	var serviceID atomic.Value
+	serviceID.Store("")
+	stop := serveStream(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceAnnouncements(ctx, func(serviceDescriptor *eurus.ServiceDescriptor) {
+			if serviceDescriptor.ID == serviceID.Load().(string) {
 				matchingAnnouncements.Add(1)
 			}
 		})
-	}()
-	<-ready
-	defer func() {
-		announceCancel()
-		require.NoError(t, <-done)
-	}()
+	})
+	defer stop()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	serviceID = service.ID
+	serviceID.Store(service.ID)
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
 	err := startService(t, service)

@@ -3,6 +3,7 @@ package localtransport
 import (
 	"context"
 
+	"github.com/RobertWHurst/eurus"
 	"github.com/coder/websocket"
 )
 
@@ -24,19 +25,18 @@ func (t *LocalTransport) ClosedSocket(socketID string, status websocket.StatusCo
 	return nil
 }
 
-// HandleSocketClosures handles socket closed events until ctx is canceled.
-func (t *LocalTransport) HandleSocketClosures(ctx context.Context, ready chan<- struct{}, handler func(socketID string, status websocket.StatusCode, reason string)) error {
-	transportLocalMessageDebug.Trace("Handling socket closures")
+// SubscribeSocketClosures subscribes to socket closure broadcasts.
+func (t *LocalTransport) SubscribeSocketClosures(_ context.Context, handler func(socketID string, status websocket.StatusCode, reason string)) (eurus.Subscription, error) {
+	transportLocalMessageDebug.Trace("Subscribing to socket closures")
 	t.mu.Lock()
-	id := t.registerHandler()
+	id := t.registerHandlerID()
 	t.socketClosedHandlers[id] = handler
 	t.mu.Unlock()
-	signalReady(ready)
 
-	<-ctx.Done()
-	transportLocalMessageDebug.Trace("Unbinding socket closed handler")
-	t.mu.Lock()
-	delete(t.socketClosedHandlers, id)
-	t.mu.Unlock()
-	return nil
+	return untilDone(func() {
+		transportLocalMessageDebug.Trace("Unsubscribing from socket closures")
+		t.mu.Lock()
+		delete(t.socketClosedHandlers, id)
+		t.mu.Unlock()
+	}), nil
 }
