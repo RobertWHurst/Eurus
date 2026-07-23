@@ -88,6 +88,8 @@ The gateway accepts WebSocket connections and routes messages to services:
 package main
 
 import (
+    "context"
+    "log"
     "net/http"
     "github.com/RobertWHurst/velaros"
     "github.com/RobertWHurst/velaros/middleware/json"
@@ -99,10 +101,15 @@ func main() {
     // Use local transport for development (NATS for production)
     transport := localtransport.New()
 
-    // Start the gateway
+    // Connect the gateway. Connect blocks like http.ListenAndServe, so run
+    // it in a goroutine; Close (or canceling the context) shuts it down.
     gateway := eurus.NewGateway("main-gateway", transport)
-    gateway.Start()
-    defer gateway.Stop()
+    go func() {
+        if err := gateway.Connect(context.Background()); err != nil {
+            log.Fatal(err)
+        }
+    }()
+    defer gateway.Close()
 
     // Mount gateway on Velaros router - this is where the magic happens
     router := velaros.NewRouter()
@@ -179,7 +186,7 @@ func main() {
     service := eurus.NewService("chat-service", transport, router)
 
     log.Println("Chat service starting...")
-    service.Run()  // Announces routes and blocks
+    log.Fatal(service.Listen(context.Background()))  // Announces routes and blocks
 }
 ```
 
@@ -300,8 +307,15 @@ transport := natstransport.New(nc)
 
 // Create gateway
 gateway := eurus.NewGateway("api-gateway", transport)
-gateway.Start()
-defer gateway.Stop()
+go func() {
+    if err := gateway.Connect(context.Background()); err != nil {
+        log.Fatal(err)
+    }
+}()
+defer gateway.Close()
+
+// Optionally wait until the gateway has announced itself before serving
+<-gateway.Ready()
 
 // Mount on router with encoding
 router := velaros.NewRouter()
@@ -381,8 +395,8 @@ service := eurus.NewService("api-service", transport, router)
 // Optional: Target specific gateways
 service.GatewayNames = []string{"public-gateway"}  // Default: all gateways
 
-// Start service
-service.Run()  // Blocks until stopped
+// Listen blocks until the context is canceled or Close is called
+log.Fatal(service.Listen(context.Background()))
 ```
 
 ### Scaling Services
@@ -442,6 +456,18 @@ NATS gives you:
 - Automatic reconnection and failover
 - High availability with clustering
 - Battle-tested messaging infrastructure
+
+Delivery details worth knowing at scale:
+- Messages that fit in a single NATS payload are delivered with one
+  request/reply round trip; oversized payloads fall back to an acked chunk
+  stream automatically.
+- Received messages are dispatched on per-socket workers: ordering is
+  preserved per socket, and a slow socket never stalls the others.
+- Each socket has a bounded dispatch queue (`DispatchQueueSize`). A socket
+  that overflows its queue is closed as a slow consumer rather than being
+  allowed to back up the whole instance.
+- Liveness heartbeats are batched — one request per service→gateway pair per
+  interval, regardless of connection count.
 
 Quick NATS setup:
 ```bash
@@ -516,17 +542,17 @@ Services can target specific gateways for multi-tenant or security-zoned deploym
 // Public-facing service
 publicService := eurus.NewService("api", transport, publicRouter)
 publicService.GatewayNames = []string{"public-gateway"}
-publicService.Start()
+go publicService.Listen(ctx)
 
 // Internal admin service
 adminService := eurus.NewService("admin", transport, adminRouter)
 adminService.GatewayNames = []string{"internal-gateway"}
-adminService.Start()
+go adminService.Listen(ctx)
 
 // Service accessible from both
 sharedService := eurus.NewService("shared", transport, sharedRouter)
 // Empty GatewayNames = announces to all gateways
-sharedService.Start()
+go sharedService.Listen(ctx)
 ```
 
 ### Connection Lifecycle
@@ -605,14 +631,33 @@ ws.onmessage = (event) => {
 Testing with Eurus is straightforward - use the local transport to run everything in-process:
 
 ```go
+// start runs a gateway or service in the background and waits until it is
+// ready. Both Gateway and Service expose Ready() for exactly this.
+func startGateway(t *testing.T, gateway *eurus.Gateway) {
+    t.Helper()
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan error, 1)
+    go func() { done <- gateway.Connect(ctx) }()
+    t.Cleanup(func() { cancel(); <-done })
+    <-gateway.Ready()
+}
+
+func startService(t *testing.T, service *eurus.Service) {
+    t.Helper()
+    ctx, cancel := context.WithCancel(context.Background())
+    done := make(chan error, 1)
+    go func() { done <- service.Listen(ctx) }()
+    t.Cleanup(func() { cancel(); <-done })
+    <-service.Ready()
+}
+
 func TestServiceRouting(t *testing.T) {
     // Everything runs in-process for testing
     transport := localtransport.New()
 
     // Set up gateway
     gateway := eurus.NewGateway("test-gateway", transport)
-    gateway.Start()
-    defer gateway.Stop()
+    startGateway(t, gateway)
 
     // Set up service
     router := velaros.NewRouter()
@@ -622,32 +667,10 @@ func TestServiceRouting(t *testing.T) {
     })
 
     service := eurus.NewService("test-service", transport, router)
-    service.Start()
-    defer service.Stop()
+    startService(t, service)
 
     // Verify the gateway can route to our service
     assert.True(t, gateway.CanServePath("/test"))
-}
-
-func TestSocketPinning(t *testing.T) {
-    transport := localtransport.New()
-
-    // Start gateway and multiple service instances
-    gateway := eurus.NewGateway("gateway", transport)
-    gateway.Start()
-
-    var instances [3]*eurus.Service
-    for i := 0; i < 3; i++ {
-        router := velaros.NewRouter()
-        router.Use(json.Middleware())
-        router.PublicBind("/test", handler)
-
-        instances[i] = eurus.NewService("service", transport, router)
-        instances[i].Start()
-    }
-
-    // Test that messages from same connection go to same instance
-    // (Implementation depends on your test framework)
 }
 ```
 
