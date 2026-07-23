@@ -1,31 +1,27 @@
 package eurus
 
 import (
+	"context"
+
 	"github.com/RobertWHurst/velaros"
 )
 
 type Transport interface {
 	AnnounceGateway(gatewayDescriptor *GatewayDescriptor) error
-	BindGatewayAnnounce(handler func(gatewayDescriptor *GatewayDescriptor)) error
-	UnbindGatewayAnnounce() error
+	HandleGatewayAnnouncements(ctx context.Context, ready chan<- struct{}, handler func(gatewayDescriptor *GatewayDescriptor)) error
 
 	AnnounceService(serviceDescriptor *ServiceDescriptor) error
-	BindServiceAnnounce(handler func(serviceDescriptor *ServiceDescriptor)) error
-	UnbindServiceAnnounce() error
+	HandleServiceAnnouncements(ctx context.Context, ready chan<- struct{}, handler func(serviceDescriptor *ServiceDescriptor)) error
 
 	MessageService(serviceID, gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) error
-	BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error
-	UnbindMessageService(serviceID string) error
+	HandleServiceMessages(ctx context.Context, ready chan<- struct{}, serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error
 
 	MessageGateway(gatewayID string, socketID string, msg *velaros.SocketMessage) error
-	BindMessageGateway(gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error
-	UnbindMessageGateway(gatewayID string) error
+	HandleGatewayMessages(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error
 
 	ClosedSocket(socketID string, status velaros.Status, reason string) error
-	BindSocketClosed(handler func(socketID string, status velaros.Status, reason string)) error
-	UnbindSocketClosed() error
+	HandleSocketClosures(ctx context.Context, ready chan<- struct{}, handler func(socketID string, status velaros.Status, reason string)) error
 
 	HeartbeatSocket(gatewayID string, serviceID string, socketID string) error
-	BindSocketHeartbeat(gatewayID string, handler func(serviceID string, socketID string) bool) error
-	UnbindSocketHeartbeat(gatewayID string) error
+	HandleSocketHeartbeats(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(serviceID string, socketID string) bool) error
 }

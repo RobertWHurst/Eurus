@@ -1,6 +1,9 @@
 package localtransport
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // HeartbeatSocket sends a heartbeat from a service to a gateway for the given socket.
 // Returns nil if the gateway confirms the socket is alive, or an error if the socket
@@ -23,18 +26,16 @@ func (t *LocalTransport) HeartbeatSocket(gatewayID string, serviceID string, soc
 	return nil
 }
 
-// BindSocketHeartbeat binds a handler for socket heartbeat requests targeted at a gateway.
+// HandleSocketHeartbeats handles heartbeat requests targeted at a gateway.
 // The handler should return true if the socket is alive, false if it is not.
-func (t *LocalTransport) BindSocketHeartbeat(gatewayID string, handler func(serviceID string, socketID string) bool) error {
-	transportLocalMessageDebug.Tracef("Binding socket heartbeat handler for gateway %s", gatewayID)
+func (t *LocalTransport) HandleSocketHeartbeats(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(serviceID string, socketID string) bool) error {
+	transportLocalMessageDebug.Tracef("Handling socket heartbeats for gateway %s", gatewayID)
 	t.mu.Lock()
 	t.socketHeartbeatHandlers[gatewayID] = handler
 	t.mu.Unlock()
-	return nil
-}
+	signalReady(ready)
 
-// UnbindSocketHeartbeat unbinds the socket heartbeat handler for a gateway
-func (t *LocalTransport) UnbindSocketHeartbeat(gatewayID string) error {
+	<-ctx.Done()
 	transportLocalMessageDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
 	t.mu.Lock()
 	delete(t.socketHeartbeatHandlers, gatewayID)

@@ -27,9 +27,9 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 
 	// Create gateway
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	// Create a Velaros router for HTTP, add JSON middleware and gateway
 	router := velaros.NewRouter()
@@ -107,10 +107,10 @@ func TestEndToEnd_WebSocketClientToService(t *testing.T) {
 			})
 		})
 
-		err = service.Start()
+		err = startService(t, service)
 		require.NoError(t, err)
 		services = append(services, service)
-		defer service.Stop()
+		defer service.Close()
 	}
 
 	// Verify gateway can serve the path
@@ -209,9 +209,9 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 
 	// Create gateway
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	// Create a Velaros router for HTTP, add JSON middleware and gateway
 	router := velaros.NewRouter()
@@ -248,10 +248,10 @@ func TestEndToEnd_MultipleConnections(t *testing.T) {
 			})
 		})
 
-		err = service.Start()
+		err = startService(t, service)
 		require.NoError(t, err)
 		services = append(services, service)
-		defer service.Stop()
+		defer service.Close()
 	}
 
 	// Give services time to announce themselves
@@ -322,9 +322,9 @@ func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	router := velaros.NewRouter()
 	router.Use(json.Middleware())
@@ -350,11 +350,11 @@ func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
 			ctx.Send(map[string]any{"instance_id": instanceID})
 		})
 
-		err = service.Start()
+		err = startService(t, service)
 		require.NoError(t, err)
 		services = append(services, service)
 	}
-	defer services[1].Stop()
+	defer services[1].Close()
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -382,7 +382,7 @@ func TestEndToEnd_ServiceCrash_ClosesSocket(t *testing.T) {
 	// Stop the pinned instance
 	for _, svc := range services {
 		if svc.ID == pinnedID {
-			svc.Stop()
+			svc.Close()
 			break
 		}
 	}
@@ -410,9 +410,9 @@ func TestEndToEnd_DisconnectThenReconnect(t *testing.T) {
 
 	gateway := eurus.NewGateway("test-gateway", transport)
 	gateway.AnnounceInterval = 100 * time.Millisecond
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	router := velaros.NewRouter()
 	router.Use(json.Middleware())
@@ -434,9 +434,9 @@ func TestEndToEnd_DisconnectThenReconnect(t *testing.T) {
 		ctx.Send(map[string]any{"instance_id": instanceID})
 	})
 
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(10 * time.Millisecond)
 
@@ -492,9 +492,9 @@ func TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	router := velaros.NewRouter()
 	router.Use(json.Middleware())
@@ -515,7 +515,7 @@ func TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy(t *testing.T) {
 	serviceRouterA.Bind("/api/ping", func(ctx *velaros.Context) {
 		ctx.Send(map[string]any{"instance_id": idA})
 	})
-	err = instanceA.Start()
+	err = startService(t, instanceA)
 	require.NoError(t, err)
 
 	serviceRouterB := velaros.NewRouter()
@@ -526,14 +526,14 @@ func TestEndToEnd_ServiceCrash_NewConnectionRoutesToHealthy(t *testing.T) {
 	serviceRouterB.Bind("/api/ping", func(ctx *velaros.Context) {
 		ctx.Send(map[string]any{"instance_id": idB})
 	})
-	err = instanceB.Start()
+	err = startService(t, instanceB)
 	require.NoError(t, err)
-	defer instanceB.Stop()
+	defer instanceB.Close()
 
 	time.Sleep(10 * time.Millisecond)
 
 	// Stop instance A
-	instanceA.Stop()
+	instanceA.Close()
 	t.Logf("Stopped instance A: %s", idA[:8])
 
 	// Open a NEW connection — it should be routed to the surviving instance B

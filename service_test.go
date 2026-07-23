@@ -1,7 +1,9 @@
 package eurus_test
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,15 +15,62 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestServiceReannouncesWhenGatewayHasOnlyOtherInstanceWithSameName(t *testing.T) {
+	transport := localtransport.New()
+
+	var matchingAnnouncements atomic.Int64
+	var serviceID string
+	announceCtx, announceCancel := context.WithCancel(context.Background())
+	defer announceCancel()
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleServiceAnnouncements(announceCtx, ready, func(serviceDescriptor *eurus.ServiceDescriptor) {
+			if serviceDescriptor.ID == serviceID {
+				matchingAnnouncements.Add(1)
+			}
+		})
+	}()
+	<-ready
+	defer func() {
+		announceCancel()
+		require.NoError(t, <-done)
+	}()
+
+	service := eurus.NewService("test-service", transport, velaros.NewRouter())
+	serviceID = service.ID
+	route, _ := eurus.NewRouteDescriptor("/test")
+	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
+	err := startService(t, service)
+	require.NoError(t, err)
+	defer service.Close()
+
+	require.Equal(t, int64(1), matchingAnnouncements.Load(), "service should announce on start")
+
+	err = transport.AnnounceGateway(&eurus.GatewayDescriptor{
+		Name: "test-gateway",
+		ServiceDescriptors: []*eurus.ServiceDescriptor{
+			{
+				Name:             "test-service",
+				ID:               "other-instance",
+				RouteDescriptors: []*eurus.RouteDescriptor{route},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	require.Equal(t, int64(2), matchingAnnouncements.Load(), "service should re-announce when its own instance ID is missing")
+}
+
 // TestClosedSocketTracking_RejectsLateMessages tests that when a socket is closed,
 // late-arriving messages cannot recreate the connection
 func TestClosedSocketTracking_RejectsLateMessages(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	messageReceived := false
 	router := velaros.NewRouter()
@@ -33,9 +82,9 @@ func TestClosedSocketTracking_RejectsLateMessages(t *testing.T) {
 	service := eurus.NewService("test-service", transport, router)
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -82,9 +131,9 @@ func TestClosedSocketTracking_PrunesOldRecords(t *testing.T) {
 	service := eurus.NewService("test-service", transport, router)
 	service.PruneInterval = 100 * time.Millisecond
 	service.ClosedSocketTTL = 300 * time.Millisecond
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	socketID := "test-socket-pruning"
 
@@ -125,18 +174,18 @@ func TestServiceHeartbeat_ClosesDeadSockets(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	router := velaros.NewRouter()
 	service := eurus.NewService("test-service", transport, router)
 	service.HeartbeatInterval = 100 * time.Millisecond
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -173,9 +222,9 @@ func TestMultipleClosures_NoDoubleCleanup(t *testing.T) {
 
 	router := velaros.NewRouter()
 	service := eurus.NewService("test-service", transport, router)
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	socketID := "test-socket-double-close"
 
@@ -209,9 +258,9 @@ func TestRaceCondition_MessageBeforeClose(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	processedMessages := 0
 	router := velaros.NewRouter()
@@ -223,9 +272,9 @@ func TestRaceCondition_MessageBeforeClose(t *testing.T) {
 	service := eurus.NewService("test-service", transport, router)
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -261,9 +310,9 @@ func TestConnection_ConcurrentHandleMessageAndClose(t *testing.T) {
 	transport := localtransport.New()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	socketID := "test-socket-concurrent"
 	connInfo := &velaros.ConnectionInfo{}
@@ -316,9 +365,9 @@ func TestService_HighConnectionChurn(t *testing.T) {
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	service.ClosedSocketTTL = 200 * time.Millisecond
 	service.PruneInterval = 50 * time.Millisecond
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -354,7 +403,7 @@ func TestService_RestartNoLeak(t *testing.T) {
 
 	for cycle := 0; cycle < 5; cycle++ {
 		service := eurus.NewService("test-service", transport, velaros.NewRouter())
-		err := service.Start()
+		err := startService(t, service)
 		require.NoError(t, err)
 
 		// Create some connections
@@ -373,7 +422,7 @@ func TestService_RestartNoLeak(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Stop service
-		service.Stop()
+		service.Close()
 
 		time.Sleep(50 * time.Millisecond)
 	}

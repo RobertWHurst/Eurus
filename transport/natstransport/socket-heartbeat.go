@@ -1,6 +1,8 @@
 package natstransport
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,10 +64,10 @@ func (t *NatsTransport) HeartbeatSocket(gatewayID string, serviceID string, sock
 	return nil
 }
 
-// BindSocketHeartbeat subscribes to heartbeat requests for a gateway.
+// HandleSocketHeartbeats handles heartbeat requests for a gateway.
 // The handler should return true if the socket is alive, false if it is not.
-func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(serviceID string, socketID string) bool) error {
-	transportNatsSocketHeartbeatDebug.Tracef("Binding socket heartbeat handler for gateway %s", gatewayID)
+func (t *NatsTransport) HandleSocketHeartbeats(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(serviceID string, socketID string) bool) error {
+	transportNatsSocketHeartbeatDebug.Tracef("Handling socket heartbeats for gateway %s", gatewayID)
 
 	subject := namespace("gateway", gatewayID, "socket-heartbeat")
 
@@ -93,23 +95,17 @@ func (t *NatsTransport) BindSocketHeartbeat(gatewayID string, handler func(servi
 		transportNatsSocketHeartbeatDebug.Tracef("Failed to subscribe: %v", err)
 		return err
 	}
+	defer sub.Unsubscribe()
 
-	t.unbindSocketHeartbeat[gatewayID] = func() error {
-		transportNatsSocketHeartbeatDebug.Tracef("Unbinding socket heartbeat handler for gateway %s", gatewayID)
-		return sub.Unsubscribe()
+	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
 	}
 
 	transportNatsSocketHeartbeatDebug.Tracef("Socket heartbeat handler bound for gateway %s", gatewayID)
-	return nil
-}
-
-// UnbindSocketHeartbeat unbinds the socket heartbeat handler for a gateway
-func (t *NatsTransport) UnbindSocketHeartbeat(gatewayID string) error {
-	if unbind, ok := t.unbindSocketHeartbeat[gatewayID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
-		delete(t.unbindSocketHeartbeat, gatewayID)
-	}
+	signalReady(ready)
+	<-ctx.Done()
 	return nil
 }

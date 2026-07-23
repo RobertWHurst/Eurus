@@ -1,14 +1,36 @@
 package localtransport
 
 import (
+	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/RobertWHurst/eurus"
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/stretchr/testify/assert"
 )
+
+func waitReady(t *testing.T, ready <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not become ready")
+	}
+}
+
+func cleanupHandler(t *testing.T, cancel context.CancelFunc, done <-chan error) {
+	t.Helper()
+	cancel()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop")
+	}
+}
 
 func TestLocalTransport_MessageService_DeliversMessageToHandler(t *testing.T) {
 	transport := New()
@@ -18,12 +40,19 @@ func TestLocalTransport_MessageService_DeliversMessageToHandler(t *testing.T) {
 	var receivedConnInfo *velaros.ConnectionInfo
 	var receivedMsg *velaros.SocketMessage
 
-	transport.BindMessageService("service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
-		receivedGatewayID = gatewayID
-		receivedSocketID = socketID
-		receivedConnInfo = connInfo
-		receivedMsg = msg
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleServiceMessages(ctx, ready, "service-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+			receivedGatewayID = gatewayID
+			receivedSocketID = socketID
+			receivedConnInfo = connInfo
+			receivedMsg = msg
+		})
+	}()
+	waitReady(t, ready)
+	defer cleanupHandler(t, cancel, done)
 
 	headers := http.Header{"X-Test": []string{"value"}}
 	connInfo := &velaros.ConnectionInfo{
@@ -54,27 +83,38 @@ func TestLocalTransport_MessageService_HandlesNoHandler(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLocalTransport_BindMessageService_RegistersHandler(t *testing.T) {
+func TestLocalTransport_HandleServiceMessages_RegistersHandler(t *testing.T) {
 	transport := New()
 
 	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 	}
-	err := transport.BindMessageService("service-1", handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleServiceMessages(ctx, ready, "service-1", handler)
+	}()
+	waitReady(t, ready)
 
-	assert.NoError(t, err)
 	assert.NotNil(t, transport.serviceMessageHandlers["service-1"])
+	cleanupHandler(t, cancel, done)
 }
 
-func TestLocalTransport_UnbindMessageService_RemovesHandler(t *testing.T) {
+func TestLocalTransport_HandleServiceMessages_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
 	handler := func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
 	}
-	transport.BindMessageService("service-1", handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleServiceMessages(ctx, ready, "service-1", handler)
+	}()
+	waitReady(t, ready)
 
-	err := transport.UnbindMessageService("service-1")
+	cleanupHandler(t, cancel, done)
 
-	assert.NoError(t, err)
 	assert.Nil(t, transport.serviceMessageHandlers["service-1"])
 }
 
@@ -84,10 +124,17 @@ func TestLocalTransport_MessageGateway_DeliversMessageToHandler(t *testing.T) {
 	var receivedSocketID string
 	var receivedMsg *velaros.SocketMessage
 
-	transport.BindMessageGateway("gateway-1", func(socketID string, msg *velaros.SocketMessage) {
-		receivedSocketID = socketID
-		receivedMsg = msg
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", func(socketID string, msg *velaros.SocketMessage) {
+			receivedSocketID = socketID
+			receivedMsg = msg
+		})
+	}()
+	waitReady(t, ready)
+	defer cleanupHandler(t, cancel, done)
 
 	err := transport.MessageGateway("gateway-1", "socket-1", &velaros.SocketMessage{
 		Type: websocket.MessageText,
@@ -111,25 +158,36 @@ func TestLocalTransport_MessageGateway_HandlesNoHandler(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLocalTransport_BindMessageGateway_RegistersHandler(t *testing.T) {
+func TestLocalTransport_HandleGatewayMessages_RegistersHandler(t *testing.T) {
 	transport := New()
 
 	handler := func(socketID string, msg *velaros.SocketMessage) {}
-	err := transport.BindMessageGateway("gateway-1", handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", handler)
+	}()
+	waitReady(t, ready)
 
-	assert.NoError(t, err)
 	assert.NotNil(t, transport.gatewayMessageHandlers["gateway-1"])
+	cleanupHandler(t, cancel, done)
 }
 
-func TestLocalTransport_UnbindMessageGateway_RemovesHandler(t *testing.T) {
+func TestLocalTransport_HandleGatewayMessages_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
 	handler := func(socketID string, msg *velaros.SocketMessage) {}
-	transport.BindMessageGateway("gateway-1", handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleGatewayMessages(ctx, ready, "gateway-1", handler)
+	}()
+	waitReady(t, ready)
 
-	err := transport.UnbindMessageGateway("gateway-1")
+	cleanupHandler(t, cancel, done)
 
-	assert.NoError(t, err)
 	assert.Nil(t, transport.gatewayMessageHandlers["gateway-1"])
 }
 
@@ -140,11 +198,18 @@ func TestLocalTransport_ClosedSocket_NotifiesHandler(t *testing.T) {
 	var receivedStatus websocket.StatusCode
 	var receivedReason string
 
-	transport.BindSocketClosed(func(socketID string, status websocket.StatusCode, reason string) {
-		receivedSocketID = socketID
-		receivedStatus = status
-		receivedReason = reason
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleSocketClosures(ctx, ready, func(socketID string, status websocket.StatusCode, reason string) {
+			receivedSocketID = socketID
+			receivedStatus = status
+			receivedReason = reason
+		})
+	}()
+	waitReady(t, ready)
+	defer cleanupHandler(t, cancel, done)
 
 	err := transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "test reason")
 
@@ -159,13 +224,26 @@ func TestLocalTransport_ClosedSocket_NotifiesMultipleHandlers(t *testing.T) {
 
 	count := 0
 
-	transport.BindSocketClosed(func(socketID string, status websocket.StatusCode, reason string) {
-		count++
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready1 := make(chan struct{}, 1)
+	done1 := make(chan error, 1)
+	go func() {
+		done1 <- transport.HandleSocketClosures(ctx, ready1, func(socketID string, status websocket.StatusCode, reason string) {
+			count++
+		})
+	}()
+	waitReady(t, ready1)
 
-	transport.BindSocketClosed(func(socketID string, status websocket.StatusCode, reason string) {
-		count++
-	})
+	ready2 := make(chan struct{}, 1)
+	done2 := make(chan error, 1)
+	go func() {
+		done2 <- transport.HandleSocketClosures(ctx, ready2, func(socketID string, status websocket.StatusCode, reason string) {
+			count++
+		})
+	}()
+	waitReady(t, ready2)
+	defer cleanupHandler(t, cancel, done1)
+	defer cleanupHandler(t, cancel, done2)
 
 	err := transport.ClosedSocket("socket-1", websocket.StatusNormalClosure, "test reason")
 
@@ -173,25 +251,36 @@ func TestLocalTransport_ClosedSocket_NotifiesMultipleHandlers(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
-func TestLocalTransport_BindSocketClosed_RegistersHandler(t *testing.T) {
+func TestLocalTransport_HandleSocketClosures_RegistersHandler(t *testing.T) {
 	transport := New()
 
 	handler := func(socketID string, status websocket.StatusCode, reason string) {}
-	err := transport.BindSocketClosed(handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleSocketClosures(ctx, ready, handler)
+	}()
+	waitReady(t, ready)
 
-	assert.NoError(t, err)
 	assert.Len(t, transport.socketClosedHandlers, 1)
+	cleanupHandler(t, cancel, done)
 }
 
-func TestLocalTransport_UnbindSocketClosed_RemovesHandlers(t *testing.T) {
+func TestLocalTransport_HandleSocketClosures_RemovesHandlerOnCancel(t *testing.T) {
 	transport := New()
 
 	handler := func(socketID string, status websocket.StatusCode, reason string) {}
-	transport.BindSocketClosed(handler)
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleSocketClosures(ctx, ready, handler)
+	}()
+	waitReady(t, ready)
 
-	err := transport.UnbindSocketClosed()
+	cleanupHandler(t, cancel, done)
 
-	assert.NoError(t, err)
 	assert.Len(t, transport.socketClosedHandlers, 0)
 }
 
@@ -206,9 +295,16 @@ func TestLocalTransport_AnnounceGateway_NotifiesHandler(t *testing.T) {
 
 	var receivedDescriptor *eurus.GatewayDescriptor
 
-	transport.BindGatewayAnnounce(func(descriptor *eurus.GatewayDescriptor) {
-		receivedDescriptor = descriptor
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleGatewayAnnouncements(ctx, ready, func(descriptor *eurus.GatewayDescriptor) {
+			receivedDescriptor = descriptor
+		})
+	}()
+	waitReady(t, ready)
+	defer cleanupHandler(t, cancel, done)
 
 	descriptor := &eurus.GatewayDescriptor{
 		Name: "gateway-1",
@@ -225,9 +321,16 @@ func TestLocalTransport_AnnounceService_NotifiesHandler(t *testing.T) {
 
 	var receivedDescriptor *eurus.ServiceDescriptor
 
-	transport.BindServiceAnnounce(func(descriptor *eurus.ServiceDescriptor) {
-		receivedDescriptor = descriptor
-	})
+	ctx, cancel := context.WithCancel(context.Background())
+	ready := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- transport.HandleServiceAnnouncements(ctx, ready, func(descriptor *eurus.ServiceDescriptor) {
+			receivedDescriptor = descriptor
+		})
+	}()
+	waitReady(t, ready)
+	defer cleanupHandler(t, cancel, done)
 
 	descriptor := &eurus.ServiceDescriptor{
 		Name: "service-1",

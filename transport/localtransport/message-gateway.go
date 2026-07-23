@@ -1,6 +1,7 @@
 package localtransport
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/RobertWHurst/velaros"
@@ -26,17 +27,15 @@ func (t *LocalTransport) MessageGateway(gatewayID string, socketID string, msg *
 	return nil
 }
 
-// BindMessageGateway binds handler for messages coming to a gateway
-func (t *LocalTransport) BindMessageGateway(gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error {
-	transportLocalMessageDebug.Tracef("Binding message handler for gateway %s", gatewayID)
+// HandleGatewayMessages handles messages coming to a gateway until ctx is canceled.
+func (t *LocalTransport) HandleGatewayMessages(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error {
+	transportLocalMessageDebug.Tracef("Handling messages for gateway %s", gatewayID)
 	t.mu.Lock()
 	t.gatewayMessageHandlers[gatewayID] = handler
 	t.mu.Unlock()
-	return nil
-}
+	signalReady(ready)
 
-// UnbindMessageGateway unbinds the message handler for a gateway
-func (t *LocalTransport) UnbindMessageGateway(gatewayID string) error {
+	<-ctx.Done()
 	transportLocalMessageDebug.Tracef("Unbinding message handler for gateway %s", gatewayID)
 	t.mu.Lock()
 	delete(t.gatewayMessageHandlers, gatewayID)

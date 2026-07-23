@@ -2,6 +2,7 @@ package natstransport
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/RobertWHurst/velaros"
@@ -138,9 +139,9 @@ func (t *NatsTransport) MessageService(serviceID, gatewayID, socketID string, co
 	return nil
 }
 
-// BindMessageService binds handler for messages coming to a service
-func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error {
-	transportNatsMessageDebug.Tracef("Binding message handler for service %s", serviceID)
+// HandleServiceMessages handles messages coming to a service until ctx is canceled.
+func (t *NatsTransport) HandleServiceMessages(ctx context.Context, ready chan<- struct{}, serviceID string, handler func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage)) error {
+	transportNatsMessageDebug.Tracef("Handling messages for service %s", serviceID)
 
 	subject := namespace("service", serviceID, "message")
 	sub, err := t.NatsConnection.SubscribeSync(subject)
@@ -148,48 +149,35 @@ func (t *NatsTransport) BindMessageService(serviceID string, handler func(gatewa
 		transportNatsMessageDebug.Tracef("Failed to subscribe: %v", err)
 		return err
 	}
+	defer sub.Unsubscribe()
 
-	const messageWorkerCount = 32
-
-	workerCh := make(chan *nats.Msg, messageWorkerCount)
-	for range messageWorkerCount {
-		go func() {
-			for msg := range workerCh {
-				assembled, header, err := t.parseServiceMessage(msg)
-				if err != nil {
-					transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
-					continue
-				}
-				t.handleServiceMessage(assembled, header, handler)
-			}
-		}()
-	}
-
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		defer close(workerCh)
-		for {
-			msg, err := sub.NextMsgWithContext(context.Background())
-			if err != nil {
-				break
-			}
-			workerCh <- msg
+	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
-	}()
-
-	t.unbindMessageService[serviceID] = func() error {
-		transportNatsMessageDebug.Tracef("Unbinding message handler for service %s", serviceID)
-		err := sub.Unsubscribe()
-		<-doneCh
 		return err
 	}
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
-	return nil
-}
+	signalReady(ready)
 
+	for {
+		msg, err := sub.NextMsgWithContext(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			transportNatsMessageDebug.Tracef("Service message stream failed for %s: %v", serviceID, err)
+			return err
+		}
+		assembled, header, err := t.parseServiceMessage(msg)
+		if err != nil {
+			transportNatsMessageDebug.Tracef("Error parsing service message: %v", err)
+			continue
+		}
+		t.handleServiceMessage(assembled, header, handler)
+	}
+}
 func (t *NatsTransport) parseServiceMessage(msg *nats.Msg) ([]byte, *ServiceMessageHeader, error) {
 	header := &ServiceMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
@@ -281,15 +269,4 @@ func (t *NatsTransport) handleServiceMessage(assembled []byte, header *ServiceMe
 	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
-}
-
-// UnbindMessageService unbinds the message handler for a service
-func (t *NatsTransport) UnbindMessageService(serviceID string) error {
-	if unbind, ok := t.unbindMessageService[serviceID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
-		delete(t.unbindMessageService, serviceID)
-	}
-	return nil
 }

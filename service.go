@@ -1,6 +1,7 @@
 package eurus
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sync"
@@ -76,9 +77,9 @@ type Service struct {
 	ClosedSocketTTL   time.Duration
 	HeartbeatInterval time.Duration
 
-	stopOnce sync.Once
-	stopChan chan struct{}
-	stopWg   sync.WaitGroup
+	lifecycleMu   sync.Mutex
+	closeCancel   context.CancelFunc
+	lifecycleDone chan struct{}
 }
 
 // NewService creates a new service with the given name, connection, and handler.
@@ -104,113 +105,132 @@ func NewService(name string, transport Transport, handler any) *Service {
 		PruneInterval:     ServicePruneInterval,
 		ClosedSocketTTL:   ClosedSocketTTL,
 		HeartbeatInterval: HeartbeatInterval,
-		stopChan:          make(chan struct{}),
 	}
 }
 
-// Start starts the service. This will bind the service to the connection and
-// announce the service to the gateway. If the service is already bound to the
-// connection, this will return an error. Start must be called before the
-// service will receive requests.
-func (s *Service) Start() error {
-	serviceDebug.Tracef("Starting service %s", s.Name)
-
+// Listen starts the service and blocks until the context is canceled, Close is
+// called, or a required transport stream fails.
+func (s *Service) Listen(ctx context.Context) error {
+	serviceDebug.Tracef("Listening as service %s", s.Name)
 	if s.Transport == nil {
 		serviceDebug.Trace("Transport not provided")
 		return fmt.Errorf(
-			"cannot start local service. The associated gateway already handles " +
+			"cannot listen as local service. The associated gateway already handles " +
 				"incoming requests",
 		)
 	}
 
-	serviceDebug.Trace("Binding gateway announcement handler")
-	if err := s.Transport.BindGatewayAnnounce(func(gatewayDescriptor *GatewayDescriptor) {
-		s.handleGatewayAnnounce(gatewayDescriptor)
-	}); err != nil {
-		serviceDebug.Tracef("Failed to bind gateway announcement handler: %v", err)
+	listenCtx, cancel := context.WithCancel(ctx)
+	if err := s.setCloseCancel(cancel); err != nil {
+		cancel()
 		return err
 	}
+	defer close(s.lifecycleDone)
+	defer s.clearCloseCancel()
+	defer cancel()
+	defer s.closeAllConnections()
 
-	serviceDebug.Trace("Binding service message handler")
-	if err := s.Transport.BindMessageService(s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
-		serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
-		connection := s.ensureConnection(gatewayID, socketID, connInfo)
-		if connection == nil {
-			serviceHandleDebug.Tracef("Dropping message for recently closed socket %s", socketID)
-			return
+	ready := make(chan struct{}, 3)
+	errCh := make(chan error, 5)
+	var wg sync.WaitGroup
+	goRun := func(name string, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := fn(); err != nil {
+				select {
+				case errCh <- fmt.Errorf("%s: %w", name, err):
+				case <-listenCtx.Done():
+				}
+			}
+		}()
+	}
+
+	goRun("gateway announcements", func() error {
+		return s.Transport.HandleGatewayAnnouncements(listenCtx, ready, func(gatewayDescriptor *GatewayDescriptor) {
+			s.handleGatewayAnnounce(listenCtx, gatewayDescriptor)
+		})
+	})
+	goRun("service messages", func() error {
+		return s.Transport.HandleServiceMessages(listenCtx, ready, s.ID, func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+			serviceHandleDebug.Tracef("Handling message from socket %s and gateway %s", socketID, gatewayID)
+			connection := s.ensureConnection(gatewayID, socketID, connInfo)
+			if connection == nil {
+				serviceHandleDebug.Tracef("Dropping message for recently closed socket %s", socketID)
+				return
+			}
+			connection.HandleMessage(msg)
+		})
+	})
+	goRun("socket closures", func() error {
+		return s.Transport.HandleSocketClosures(listenCtx, ready, func(socketID string, status velaros.Status, reason string) {
+			serviceHandleDebug.Tracef("Handling close for socket %s", socketID)
+			s.closeConnection(socketID, status, reason)
+		})
+	})
+	goRun("prune loop", func() error {
+		s.pruneLoop(listenCtx)
+		return nil
+	})
+	goRun("heartbeat loop", func() error {
+		s.heartbeatLoop(listenCtx)
+		return nil
+	})
+
+	for i := 0; i < 3; i++ {
+		select {
+		case <-ready:
+		case err := <-errCh:
+			cancel()
+			wg.Wait()
+			return err
+		case <-listenCtx.Done():
+			cancel()
+			wg.Wait()
+			return nil
 		}
-		connection.HandleMessage(msg)
-	}); err != nil {
-		serviceDebug.Tracef("Failed to bind service message handler: %v", err)
-		return err
 	}
-
-	serviceDebug.Trace("Binding close socket handler")
-	if err := s.Transport.BindSocketClosed(func(socketID string, status velaros.Status, reason string) {
-		serviceHandleDebug.Tracef("Handling close for socket %s", socketID)
-		s.closeConnection(socketID, status, reason)
-	}); err != nil {
-		serviceDebug.Tracef("Failed to bind close socket handler: %v", err)
-		return err
-	}
-
-	serviceDebug.Trace("Starting prune and heartbeat loops")
-	s.stopWg.Add(2)
-	go s.pruneLoop()
-	go s.heartbeatLoop()
 
 	serviceDebug.Trace("Announcing service to gateways")
 	if err := s.doAnnounce(); err != nil {
+		cancel()
+		wg.Wait()
 		serviceDebug.Tracef("Failed to announce service: %v", err)
 		return err
 	}
 
-	serviceDebug.Tracef("Service %s started successfully", s.Name)
+	select {
+	case err := <-errCh:
+		cancel()
+		wg.Wait()
+		return err
+	case <-listenCtx.Done():
+		cancel()
+		wg.Wait()
+		return nil
+	}
+}
+
+// Close interrupts a running Listen call. It is safe to call multiple times.
+func (s *Service) Close() error {
+	s.lifecycleMu.Lock()
+	cancel := s.closeCancel
+	done := s.lifecycleDone
+	s.lifecycleMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 	return nil
 }
 
-// Stop stops the service. This will unbind the service from the connection.
-// This provides a way to dispose of the service if need be. It is safe to
-// call multiple times.
-func (s *Service) Stop() {
-	s.stopOnce.Do(func() {
-		serviceDebug.Tracef("Stopping service %s", s.Name)
-
-		// Signal the prune loop to stop first, then wait for it to exit.
-		close(s.stopChan)
-		s.stopWg.Wait()
-
-		s.closeAllConnections()
-
-		serviceDebug.Trace("Unbinding gateway announcement handler")
-		if err := s.Transport.UnbindGatewayAnnounce(); err != nil {
-			serviceDebug.Tracef("Failed to unbind gateway announcement handler: %v", err)
-		}
-
-		serviceDebug.Trace("Unbinding dispatch handler")
-		if err := s.Transport.UnbindMessageService(s.ID); err != nil {
-			serviceDebug.Tracef("Failed to unbind dispatch handler: %v", err)
-		}
-
-		serviceDebug.Trace("Unbinding socket closed handler")
-		if err := s.Transport.UnbindSocketClosed(); err != nil {
-			serviceDebug.Tracef("Failed to unbind socket closed handler: %v", err)
-		}
-
-		serviceDebug.Tracef("Service %s stopped successfully", s.Name)
-	})
-}
-
-func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
+func (s *Service) handleGatewayAnnounce(ctx context.Context, gatewayDescriptor *GatewayDescriptor) {
 	serviceAnnounceDebug.Tracef("Received gateway announcement from %s", gatewayDescriptor.Name)
-
-	// Check if stopped — don't attempt to re-announce after shutdown.
-	select {
-	case <-s.stopChan:
+	if ctx.Err() != nil {
 		return
-	default:
 	}
-
 	isWantedGateway := len(s.GatewayNames) == 0
 	if !isWantedGateway {
 		if slices.Contains(s.GatewayNames, gatewayDescriptor.Name) {
@@ -225,7 +245,7 @@ func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
 	serviceAnnounceDebug.Trace("Checking if service is registered with gateway")
 	foundSelf := false
 	for _, descriptor := range gatewayDescriptor.ServiceDescriptors {
-		if descriptor.Name == s.Name {
+		if descriptor.ID == s.ID {
 			serviceAnnounceDebug.Trace("Service found in gateway's service index")
 			foundSelf = true
 			break
@@ -238,22 +258,6 @@ func (s *Service) handleGatewayAnnounce(gatewayDescriptor *GatewayDescriptor) {
 			serviceAnnounceDebug.Tracef("Failed to announce service: %v", err)
 		}
 	}
-}
-
-// Run starts the service and blocks until the service is stopped.
-func (s *Service) Run() error {
-	serviceDebug.Tracef("Running service %s", s.Name)
-
-	if err := s.Start(); err != nil {
-		serviceDebug.Tracef("Failed to start service: %v", err)
-		return err
-	}
-
-	serviceDebug.Trace("Waiting for service to be stopped")
-	<-s.stopChan
-
-	serviceDebug.Trace("Service run completed")
-	return nil
 }
 
 func (s *Service) doAnnounce() error {
@@ -341,14 +345,13 @@ func (s *Service) closeAllConnections() {
 	}
 }
 
-func (s *Service) pruneLoop() {
-	defer s.stopWg.Done()
+func (s *Service) pruneLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.PruneInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-s.stopChan:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.pruneStaleResources()
@@ -368,14 +371,13 @@ func (s *Service) pruneStaleResources() {
 	s.connectionsMu.Unlock()
 }
 
-func (s *Service) heartbeatLoop() {
-	defer s.stopWg.Done()
+func (s *Service) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.HeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-s.stopChan:
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			s.connectionsMu.Lock()
@@ -400,4 +402,22 @@ func (s *Service) heartbeatLoop() {
 			}
 		}
 	}
+}
+
+func (s *Service) setCloseCancel(cancel context.CancelFunc) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.closeCancel != nil {
+		return fmt.Errorf("service already listening")
+	}
+	s.closeCancel = cancel
+	s.lifecycleDone = make(chan struct{})
+	return nil
+}
+
+func (s *Service) clearCloseCancel() {
+	s.lifecycleMu.Lock()
+	s.closeCancel = nil
+	s.lifecycleDone = nil
+	s.lifecycleMu.Unlock()
 }

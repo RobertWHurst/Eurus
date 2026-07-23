@@ -2,6 +2,7 @@ package natstransport
 
 import (
 	"context"
+	"errors"
 
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
@@ -131,9 +132,9 @@ func (t *NatsTransport) MessageGateway(gatewayID string, socketID string, msg *v
 	return nil
 }
 
-// BindMessageGateway binds handler for messages coming to a gateway
-func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error {
-	transportNatsMessageDebug.Tracef("Binding message handler for gateway %s", gatewayID)
+// HandleGatewayMessages handles messages coming to a gateway until ctx is canceled.
+func (t *NatsTransport) HandleGatewayMessages(ctx context.Context, ready chan<- struct{}, gatewayID string, handler func(socketID string, msg *velaros.SocketMessage)) error {
+	transportNatsMessageDebug.Tracef("Handling messages for gateway %s", gatewayID)
 
 	subject := namespace("gateway", gatewayID, "message")
 
@@ -142,36 +143,35 @@ func (t *NatsTransport) BindMessageGateway(gatewayID string, handler func(socket
 		transportNatsMessageDebug.Tracef("Failed to subscribe: %v", err)
 		return err
 	}
+	defer sub.Unsubscribe()
 
-	doneCh := make(chan struct{})
-
-	go func() {
-		defer close(doneCh)
-		for {
-			msg, err := sub.NextMsgWithContext(context.Background())
-			if err != nil {
-				break
-			}
-			assembled, header, err := t.parseGatewayMessage(msg)
-			if err != nil {
-				transportNatsMessageDebug.Tracef("Error parsing gateway message: %v", err)
-				continue
-			}
-			t.handleGatewayMessage(assembled, header, handler)
+	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
 		}
-	}()
-
-	t.unbindMessageGateway[gatewayID] = func() error {
-		transportNatsMessageDebug.Tracef("Unbinding message handler for gateway %s", gatewayID)
-		err := sub.Unsubscribe()
-		<-doneCh
 		return err
 	}
 
 	transportNatsMessageDebug.Trace("Message handler bound successfully")
-	return nil
-}
+	signalReady(ready)
 
+	for {
+		msg, err := sub.NextMsgWithContext(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			transportNatsMessageDebug.Tracef("Gateway message stream failed for %s: %v", gatewayID, err)
+			return err
+		}
+		assembled, header, err := t.parseGatewayMessage(msg)
+		if err != nil {
+			transportNatsMessageDebug.Tracef("Error parsing gateway message: %v", err)
+			continue
+		}
+		t.handleGatewayMessage(assembled, header, handler)
+	}
+}
 func (t *NatsTransport) parseGatewayMessage(msg *nats.Msg) ([]byte, *GatewayMessageHeader, error) {
 	header := &GatewayMessageHeader{}
 	if err := msgpack.Unmarshal(msg.Data, header); err != nil {
@@ -259,15 +259,4 @@ func (t *NatsTransport) handleGatewayMessage(assembled []byte, header *GatewayMe
 	})
 
 	transportNatsMessageDebug.Trace("Message delivered successfully")
-}
-
-// UnbindMessageGateway unbinds the message handler for a gateway
-func (t *NatsTransport) UnbindMessageGateway(gatewayID string) error {
-	if unbind, ok := t.unbindMessageGateway[gatewayID]; ok {
-		if err := unbind(); err != nil {
-			return err
-		}
-		delete(t.unbindMessageGateway, gatewayID)
-	}
-	return nil
 }

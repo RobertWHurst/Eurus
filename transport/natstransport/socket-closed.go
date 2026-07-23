@@ -1,6 +1,9 @@
 package natstransport
 
 import (
+	"context"
+	"errors"
+
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/telemetryos/go-debug/debug"
@@ -45,9 +48,9 @@ func (t *NatsTransport) ClosedSocket(socketID string, status websocket.StatusCod
 	return nil
 }
 
-// BindSocketClosed binds handler for socket closed events
-func (t *NatsTransport) BindSocketClosed(handler func(socketID string, status websocket.StatusCode, reason string)) error {
-	transportNatsSocketClosedDebug.Trace("Binding socket closed handler")
+// HandleSocketClosures handles socket closed events until ctx is canceled.
+func (t *NatsTransport) HandleSocketClosures(ctx context.Context, ready chan<- struct{}, handler func(socketID string, status websocket.StatusCode, reason string)) error {
+	transportNatsSocketClosedDebug.Trace("Handling socket closures")
 
 	subject := namespace("socket", "closed")
 
@@ -68,20 +71,17 @@ func (t *NatsTransport) BindSocketClosed(handler func(socketID string, status we
 		transportNatsSocketClosedDebug.Tracef("Failed to subscribe: %v", err)
 		return err
 	}
+	defer sub.Unsubscribe()
 
-	t.unbindSocketClosed = func() error {
-		transportNatsSocketClosedDebug.Trace("Unbinding socket closed handler")
-		return sub.Unsubscribe()
+	if err := flushWithContext(ctx, t.NatsConnection); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
 	}
 
 	transportNatsSocketClosedDebug.Trace("Socket closed handler bound successfully")
-	return nil
-}
-
-// UnbindSocketClosed unbinds the socket closed handler
-func (t *NatsTransport) UnbindSocketClosed() error {
-	if t.unbindSocketClosed != nil {
-		return t.unbindSocketClosed()
-	}
+	signalReady(ready)
+	<-ctx.Done()
 	return nil
 }

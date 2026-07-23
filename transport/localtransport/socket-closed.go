@@ -1,6 +1,8 @@
 package localtransport
 
 import (
+	"context"
+
 	"github.com/coder/websocket"
 )
 
@@ -9,8 +11,10 @@ func (t *LocalTransport) ClosedSocket(socketID string, status websocket.StatusCo
 	transportLocalMessageDebug.Tracef("Broadcasting socket closed: %s (status: %d, reason: %s)", socketID, status, reason)
 
 	t.mu.RLock()
-	handlers := make([]func(socketID string, status websocket.StatusCode, reason string), len(t.socketClosedHandlers))
-	copy(handlers, t.socketClosedHandlers)
+	handlers := make([]func(socketID string, status websocket.StatusCode, reason string), 0, len(t.socketClosedHandlers))
+	for _, handler := range t.socketClosedHandlers {
+		handlers = append(handlers, handler)
+	}
 	t.mu.RUnlock()
 
 	for _, handler := range handlers {
@@ -20,20 +24,19 @@ func (t *LocalTransport) ClosedSocket(socketID string, status websocket.StatusCo
 	return nil
 }
 
-// BindSocketClosed binds handler for socket closed events
-func (t *LocalTransport) BindSocketClosed(handler func(socketID string, status websocket.StatusCode, reason string)) error {
-	transportLocalMessageDebug.Trace("Binding socket closed handler")
+// HandleSocketClosures handles socket closed events until ctx is canceled.
+func (t *LocalTransport) HandleSocketClosures(ctx context.Context, ready chan<- struct{}, handler func(socketID string, status websocket.StatusCode, reason string)) error {
+	transportLocalMessageDebug.Trace("Handling socket closures")
 	t.mu.Lock()
-	t.socketClosedHandlers = append(t.socketClosedHandlers, handler)
+	id := t.registerHandler()
+	t.socketClosedHandlers[id] = handler
 	t.mu.Unlock()
-	return nil
-}
+	signalReady(ready)
 
-// UnbindSocketClosed unbinds the socket closed handler
-func (t *LocalTransport) UnbindSocketClosed() error {
+	<-ctx.Done()
 	transportLocalMessageDebug.Trace("Unbinding socket closed handler")
 	t.mu.Lock()
-	t.socketClosedHandlers = nil
+	delete(t.socketClosedHandlers, id)
 	t.mu.Unlock()
 	return nil
 }

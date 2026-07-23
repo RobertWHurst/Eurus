@@ -1,6 +1,7 @@
 package eurus_test
 
 import (
+	"context"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -20,14 +21,14 @@ func TestServiceDisappears_StillIndexed(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
 
 	// Wait for service announcement
@@ -38,7 +39,7 @@ func TestServiceDisappears_StillIndexed(t *testing.T) {
 	assert.True(t, canServe, "Gateway should be able to serve path while service is running")
 
 	// Service suddenly stops (simulating crash or network failure)
-	service.Stop()
+	service.Close()
 
 	// The gateway should still report it can serve (cached/stale entry)
 	// This is expected behavior - services are removed by health monitoring, not immediately
@@ -52,22 +53,22 @@ func TestServiceDisappears_MultipleInstances(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	// Create two service instances with the same name
 	service1 := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service1.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service1.Start()
+	err = startService(t, service1)
 	require.NoError(t, err)
 
 	service2 := eurus.NewService("test-service", transport, velaros.NewRouter())
 	service2.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service2.Start()
+	err = startService(t, service2)
 	require.NoError(t, err)
-	defer service2.Stop()
+	defer service2.Close()
 
 	// Wait for announcements
 	time.Sleep(50 * time.Millisecond)
@@ -77,7 +78,7 @@ func TestServiceDisappears_MultipleInstances(t *testing.T) {
 	assert.True(t, canServe)
 
 	// Stop first instance
-	service1.Stop()
+	service1.Close()
 
 	// Gateway should still be able to serve via the second instance
 	// (both instances are still in the index, second one is healthy)
@@ -92,15 +93,15 @@ func TestGatewayDisappears_ServiceContinuesRunning(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway1 := eurus.NewGateway("gateway-1", transport)
-	err := gateway1.Start()
+	err := startGateway(t, gateway1)
 	require.NoError(t, err)
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	// Wait for announcements
 	time.Sleep(50 * time.Millisecond)
@@ -110,7 +111,7 @@ func TestGatewayDisappears_ServiceContinuesRunning(t *testing.T) {
 	assert.True(t, canServe)
 
 	// Gateway suddenly stops
-	gateway1.Stop()
+	gateway1.Close()
 
 	// Service should still be running (not panic or crash)
 	assert.Equal(t, "test-service", service.Name)
@@ -118,9 +119,9 @@ func TestGatewayDisappears_ServiceContinuesRunning(t *testing.T) {
 
 	// Start a new gateway
 	gateway2 := eurus.NewGateway("gateway-2", transport)
-	err = gateway2.Start()
+	err = startGateway(t, gateway2)
 	require.NoError(t, err)
-	defer gateway2.Stop()
+	defer gateway2.Close()
 
 	// Service should announce to new gateway
 	time.Sleep(50 * time.Millisecond)
@@ -134,9 +135,9 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	messageReceived := make(chan bool, 1)
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
@@ -152,7 +153,7 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 		ctx.Next()
 	})
 
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -162,7 +163,7 @@ func TestMessageDelivery_ServiceStops(t *testing.T) {
 	assert.True(t, canServe)
 
 	// Stop service before sending message
-	service.Stop()
+	service.Close()
 
 	// Try to send a message (should error since handler is unbound)
 	err = transport.MessageService(service.ID, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
@@ -186,20 +187,20 @@ func TestMessageDelivery_GatewayStops(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
 	// Stop gateway
-	gateway.Stop()
+	gateway.Close()
 
 	// Try to send a message back to the gateway (should error - handler unbound)
 	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
@@ -215,23 +216,23 @@ func TestMultipleGateways_ServiceSelectiveAnnouncement(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway1 := eurus.NewGateway("gateway-1", transport)
-	err := gateway1.Start()
+	err := startGateway(t, gateway1)
 	require.NoError(t, err)
-	defer gateway1.Stop()
+	defer gateway1.Close()
 
 	gateway2 := eurus.NewGateway("gateway-2", transport)
-	err = gateway2.Start()
+	err = startGateway(t, gateway2)
 	require.NoError(t, err)
-	defer gateway2.Stop()
+	defer gateway2.Close()
 
 	// Service announces only to gateway-1
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	service.GatewayNames = []string{"gateway-1"}
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -244,7 +245,7 @@ func TestMultipleGateways_ServiceSelectiveAnnouncement(t *testing.T) {
 	assert.False(t, canServe2, "Service should NOT be registered with gateway-2")
 
 	// Gateway-1 disappears
-	gateway1.Stop()
+	gateway1.Close()
 
 	// Service should still be running
 	assert.NotNil(t, service.Transport)
@@ -262,9 +263,9 @@ func TestRapidServiceChurn(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	successfulStarts := 0
 	successfulStops := 0
@@ -275,7 +276,7 @@ func TestRapidServiceChurn(t *testing.T) {
 		route, _ := eurus.NewRouteDescriptor("/api/test")
 		service.RouteDescriptors = []*eurus.RouteDescriptor{route}
 
-		err = service.Start()
+		err = startService(t, service)
 		if err == nil {
 			successfulStarts++
 		}
@@ -287,7 +288,7 @@ func TestRapidServiceChurn(t *testing.T) {
 			// Service was registered
 		}
 
-		service.Stop()
+		service.Close()
 		successfulStops++
 
 		time.Sleep(2 * time.Millisecond)
@@ -310,9 +311,9 @@ func TestRapidServiceChurn(t *testing.T) {
 	freshService := eurus.NewService("fresh-service", transport, velaros.NewRouter())
 	freshRoute, _ := eurus.NewRouteDescriptor("/api/fresh")
 	freshService.RouteDescriptors = []*eurus.RouteDescriptor{freshRoute}
-	err = freshService.Start()
+	err = startService(t, freshService)
 	require.NoError(t, err, "Gateway should still accept new service registrations after churn")
-	defer freshService.Stop()
+	defer freshService.Close()
 
 	time.Sleep(10 * time.Millisecond)
 	canServeFresh := gateway.CanServePath("/api/fresh")
@@ -327,9 +328,9 @@ func TestConcurrentGatewayServiceOperations(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	type result struct {
 		id           int
@@ -346,7 +347,7 @@ func TestConcurrentGatewayServiceOperations(t *testing.T) {
 			route, _ := eurus.NewRouteDescriptor("/api/test")
 			service.RouteDescriptors = []*eurus.RouteDescriptor{route}
 
-			startErr := service.Start()
+			startErr := startService(t, service)
 
 			// Check if gateway can reach the service after announcement
 			time.Sleep(10 * time.Millisecond)
@@ -354,7 +355,7 @@ func TestConcurrentGatewayServiceOperations(t *testing.T) {
 
 			time.Sleep(10 * time.Millisecond)
 
-			service.Stop()
+			service.Close()
 
 			results <- result{
 				id:           id,
@@ -395,9 +396,9 @@ func TestConcurrentGatewayServiceOperations(t *testing.T) {
 	newService := eurus.NewService("new-service", transport, velaros.NewRouter())
 	newRoute, _ := eurus.NewRouteDescriptor("/api/new")
 	newService.RouteDescriptors = []*eurus.RouteDescriptor{newRoute}
-	err = newService.Start()
+	err = startService(t, newService)
 	require.NoError(t, err, "Gateway should accept new registrations after concurrent operations")
-	defer newService.Stop()
+	defer newService.Close()
 
 	time.Sleep(10 * time.Millisecond)
 	canServeNew := gateway.CanServePath("/api/new")
@@ -410,16 +411,16 @@ func TestServiceReannouncement(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -428,12 +429,12 @@ func TestServiceReannouncement(t *testing.T) {
 	assert.True(t, canServe)
 
 	// Stop and restart gateway (simulating gateway restart)
-	gateway.Stop()
+	gateway.Close()
 
 	gateway2 := eurus.NewGateway("test-gateway", transport)
-	err = gateway2.Start()
+	err = startGateway(t, gateway2)
 	require.NoError(t, err)
-	defer gateway2.Stop()
+	defer gateway2.Close()
 
 	// Service should re-announce to the new gateway instance
 	time.Sleep(50 * time.Millisecond)
@@ -453,16 +454,16 @@ func TestServiceReannounceAfterPrune(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -483,14 +484,14 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -499,7 +500,7 @@ func TestSocketClose_ServiceStopped(t *testing.T) {
 	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
 
 	// Stop service (should not panic)
-	service.Stop()
+	service.Close()
 
 	// Connection operations should be safe
 	// conn.Write calls MessageGateway — the gateway is still running so the handler is bound
@@ -515,15 +516,15 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -531,7 +532,7 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 	conn := eurus.NewConnection(transport, gateway.ID, "socket-1", &velaros.ConnectionInfo{}, func() {})
 
 	// Stop gateway
-	gateway.Stop()
+	gateway.Close()
 
 	// Writing to stopped gateway should error (handler unbound)
 	err = conn.Write(nil, &velaros.SocketMessage{
@@ -547,7 +548,7 @@ func TestSocketClose_GatewayStopped(t *testing.T) {
 
 // TestConnection_WriteFailure_AutoCleanup tests that when Connection.Write() fails,
 // the connection is automatically closed and cleanup callback is invoked.
-// Gateway.Stop() does not unbind the message handler, so we test with a gateway ID
+// Gateway.Close() does not unbind the message handler, so we test with a gateway ID
 // that was never registered to trigger the error path.
 func TestConnection_WriteFailure_AutoCleanup(t *testing.T) {
 	transport := localtransport.New()
@@ -582,9 +583,9 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	// Create 3 instances of the same service
 	services := make([]*eurus.Service, 3)
@@ -593,7 +594,7 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 		service := eurus.NewService("test-service", transport, velaros.NewRouter())
 		route, _ := eurus.NewRouteDescriptor("/api/test")
 		service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-		err = service.Start()
+		err = startService(t, service)
 		require.NoError(t, err)
 		services[i] = service
 	}
@@ -602,7 +603,7 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 	defer func() {
 		for i, svc := range services {
 			if !stopped[i] {
-				svc.Stop()
+				svc.Close()
 			}
 		}
 	}()
@@ -614,7 +615,7 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 	assert.True(t, canServe)
 
 	// Stop one instance - should still work
-	services[0].Stop()
+	services[0].Close()
 	stopped[0] = true
 	time.Sleep(10 * time.Millisecond)
 
@@ -622,7 +623,7 @@ func TestMultipleServicesWithSameName(t *testing.T) {
 	assert.True(t, canServe, "Should still serve with 2 instances remaining")
 
 	// Stop another - should still work
-	services[1].Stop()
+	services[1].Close()
 	stopped[1] = true
 	time.Sleep(10 * time.Millisecond)
 
@@ -643,16 +644,16 @@ func TestServiceSurvivesAllClientsDisconnecting(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -691,16 +692,16 @@ func TestServiceSurvivesDisconnectThenReconnect(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -742,16 +743,16 @@ func TestServiceReappearsAfterPrune(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -773,22 +774,22 @@ func TestEmptyGatewayNames_AnnouncesToAll(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway1 := eurus.NewGateway("gateway-1", transport)
-	err := gateway1.Start()
+	err := startGateway(t, gateway1)
 	require.NoError(t, err)
-	defer gateway1.Stop()
+	defer gateway1.Close()
 
 	gateway2 := eurus.NewGateway("gateway-2", transport)
-	err = gateway2.Start()
+	err = startGateway(t, gateway2)
 	require.NoError(t, err)
-	defer gateway2.Stop()
+	defer gateway2.Close()
 
 	// Service with empty GatewayNames should announce to all
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	route, _ := eurus.NewRouteDescriptor("/api/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -806,12 +807,12 @@ func TestGateway_Stop_UnbindsAllHandlers(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
 
-	gateway.Stop()
+	gateway.Close()
 
 	// Try to send messages after stop - should error (no handler bound)
 	err = transport.MessageGateway(gateway.ID, "socket-1", &velaros.SocketMessage{
@@ -827,16 +828,16 @@ func TestService_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	router := velaros.NewRouter()
 	service := eurus.NewService("test-service", transport, router)
 	service.HeartbeatInterval = 50 * time.Millisecond
 	route, _ := eurus.NewRouteDescriptor("/test")
 	service.RouteDescriptors = []*eurus.RouteDescriptor{route}
-	err = service.Start()
+	err = startService(t, service)
 	require.NoError(t, err)
 
 	time.Sleep(50 * time.Millisecond)
@@ -851,16 +852,25 @@ func TestService_HeartbeatLoop_StopsCleanly(t *testing.T) {
 	require.NoError(t, err)
 
 	var heartbeatsReceived atomic.Int64
-	err = transport.BindSocketHeartbeat(gateway.ID, func(serviceID string, socketID string) bool {
-		heartbeatsReceived.Add(1)
-		return true
-	})
-	require.NoError(t, err)
+	heartbeatCtx, heartbeatCancel := context.WithCancel(context.Background())
+	heartbeatReady := make(chan struct{}, 1)
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		heartbeatDone <- transport.HandleSocketHeartbeats(heartbeatCtx, heartbeatReady, gateway.ID, func(serviceID string, socketID string) bool {
+			heartbeatsReceived.Add(1)
+			return true
+		})
+	}()
+	<-heartbeatReady
+	defer func() {
+		heartbeatCancel()
+		require.NoError(t, <-heartbeatDone)
+	}()
 
 	time.Sleep(120 * time.Millisecond)
 	countBeforeStop := heartbeatsReceived.Load()
 
-	service.Stop()
+	service.Close()
 	time.Sleep(120 * time.Millisecond)
 
 	// No new heartbeats should be sent after service stops
@@ -873,9 +883,9 @@ func TestGateway_ProtectedMapDeletion_NoRace(t *testing.T) {
 	transport := localtransport.New()
 
 	gateway := eurus.NewGateway("test-gateway", transport)
-	err := gateway.Start()
+	err := startGateway(t, gateway)
 	require.NoError(t, err)
-	defer gateway.Stop()
+	defer gateway.Close()
 
 	done := make(chan bool, 2)
 
@@ -909,9 +919,9 @@ func TestService_HighConnectionChurn_BoundedMemory(t *testing.T) {
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
 	service.ClosedSocketTTL = 100 * time.Millisecond
 	service.PruneInterval = 30 * time.Millisecond
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -945,7 +955,7 @@ func TestService_MultipleStartStop_NoLeaks(t *testing.T) {
 
 	for cycle := 0; cycle < 5; cycle++ {
 		service := eurus.NewService(fmt.Sprintf("test-service-%d", cycle), transport, velaros.NewRouter())
-		err := service.Start()
+		err := startService(t, service)
 		require.NoError(t, err)
 
 		connInfo := &velaros.ConnectionInfo{}
@@ -962,7 +972,7 @@ func TestService_MultipleStartStop_NoLeaks(t *testing.T) {
 		}
 
 		time.Sleep(50 * time.Millisecond)
-		service.Stop()
+		service.Close()
 		time.Sleep(50 * time.Millisecond)
 	}
 }
@@ -973,9 +983,9 @@ func TestConnection_SendToClosedConnection_NoError(t *testing.T) {
 	transport := localtransport.New()
 
 	service := eurus.NewService("test-service", transport, velaros.NewRouter())
-	err := service.Start()
+	err := startService(t, service)
 	require.NoError(t, err)
-	defer service.Stop()
+	defer service.Close()
 
 	socketID := "test-socket-send-closed"
 	connInfo := &velaros.ConnectionInfo{}
