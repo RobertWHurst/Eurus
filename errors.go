@@ -21,4 +21,8 @@ var (
 	// overflowed. It indicates a problem with the socket, not the receiving
 	// instance.
 	ErrSlowConsumer = errors.New("eurus: slow consumer")
+
+	// ErrNoRouteMetadata is returned by RouteDescriptor.UnmarshalMetadata
+	// when the route has no metadata attached.
+	ErrNoRouteMetadata = errors.New("eurus: route has no metadata")
 )

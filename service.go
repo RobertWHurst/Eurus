@@ -257,7 +257,8 @@ func (s *Service) doAnnounce() error {
 			velarosRouteDescriptors := provider.RouteDescriptors()
 			for _, velarosRouteDescriptor := range velarosRouteDescriptors {
 				routeDescriptors = append(routeDescriptors, &RouteDescriptor{
-					Pattern: velarosRouteDescriptor.Pattern,
+					Pattern:  velarosRouteDescriptor.Pattern,
+					Metadata: velarosRouteDescriptor.Metadata,
 				})
 			}
 		}

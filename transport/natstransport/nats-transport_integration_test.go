@@ -448,6 +448,7 @@ func TestNatsTransport_ServiceAnnouncement_CarriesRouteDescriptors(t *testing.T)
 
 	route, err := eurus.NewRouteDescriptor("/api/items/:id")
 	require.NoError(t, err)
+	route.Metadata = map[string]any{"auth": "required"}
 	require.NoError(t, transport.AnnounceService(&eurus.ServiceDescriptor{
 		Name:             "svc-1",
 		ID:               "svc-1-id",
@@ -460,6 +461,12 @@ func TestNatsTransport_ServiceAnnouncement_CarriesRouteDescriptors(t *testing.T)
 		require.NotNil(t, descriptor.RouteDescriptors[0].Pattern)
 		_, matched := descriptor.RouteDescriptors[0].Pattern.Match("/api/items/42")
 		assert.True(t, matched, "route pattern must survive the msgpack round trip")
+
+		var metadata struct {
+			Auth string `msgpack:"auth"`
+		}
+		require.NoError(t, descriptor.RouteDescriptors[0].UnmarshalMetadata(&metadata))
+		assert.Equal(t, "required", metadata.Auth, "route metadata must survive the msgpack round trip")
 	case <-time.After(5 * time.Second):
 		t.Fatal("announcement not delivered")
 	}

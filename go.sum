@@ -1,7 +1,7 @@
 github.com/RobertWHurst/navaros v1.22.1 h1:uS4+3nuxaWq3Ys8UbSUmLOMb8G8OOIwTRqcCxys0VJ8=
 github.com/RobertWHurst/navaros v1.22.1/go.mod h1:0QO7XN4pS+fvI6UqNYcHFaYSO1L8J56TCrJvYD7T3eQ=
-github.com/RobertWHurst/velaros v1.27.0 h1:im/ZYo/jboTqr4cLYwV/nnVsPHhMvQnnMAbyJOlCrTw=
-github.com/RobertWHurst/velaros v1.27.0/go.mod h1:7SpgpAD+4j8jXMMF7lD5cE6tPxjwPONedRuVG/F26bU=
+github.com/RobertWHurst/velaros v1.29.0 h1:9Pz9ZXCnLhYj3dWvov+9z6iTo31ftiLY5DrPmvKSBYo=
+github.com/RobertWHurst/velaros v1.29.0/go.mod h1:7SpgpAD+4j8jXMMF7lD5cE6tPxjwPONedRuVG/F26bU=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op h1:Z/MZK75wC/NSrkgqeNIa7jexam9uWzhLmFTSCPI/kn0=
 github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/coder/websocket v1.8.14 h1:9L0p0iKiNOibykf283eHkKUHHrpG7f65OE3BhhO7v9g=
