@@ -1,4 +1,4 @@
-module github.com/RobertWHurst/eurus
+module github.com/RobertWHurst/eurus/v2
 
 go 1.25.0
 

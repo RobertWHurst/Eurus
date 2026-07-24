@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/RobertWHurst/velaros"
 )
 

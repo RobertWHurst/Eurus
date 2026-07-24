@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/coder/websocket"
 	"github.com/nats-io/nats.go"
 	"github.com/telemetryos/go-debug/debug"

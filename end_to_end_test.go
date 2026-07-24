@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RobertWHurst/eurus"
-	"github.com/RobertWHurst/eurus/transport/localtransport"
+	"github.com/RobertWHurst/eurus/v2"
+	"github.com/RobertWHurst/eurus/v2/transport/localtransport"
 	"github.com/RobertWHurst/velaros"
 	"github.com/RobertWHurst/velaros/middleware/json"
 	"github.com/coder/websocket"

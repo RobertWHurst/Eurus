@@ -3,7 +3,7 @@ package localtransport
 import (
 	"context"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 )
 
 func (t *LocalTransport) AnnounceGateway(gatewayDescriptor *eurus.GatewayDescriptor) error {

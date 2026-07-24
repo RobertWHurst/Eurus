@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/nats-io/nats.go"
 )
 

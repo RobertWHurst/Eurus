@@ -3,7 +3,7 @@ package localtransport
 import (
 	"context"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/coder/websocket"
 )
 

@@ -4,8 +4,8 @@ A WebSocket API gateway for microservices. Routes messages to services based on 
 
 Eurus lets you distribute WebSocket connections across multiple backend services. Instead of all connections going to one server, a gateway routes messages to different services based on the message path - similar to how HTTP API gateways work. Each connection gets pinned to a service instance that maintains its state. Services are [Velaros](https://github.com/RobertWHurst/Velaros) routers, so you get bidirectional communication, pattern-based routing, and connection state management.
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/RobertWHurst/eurus.svg)](https://pkg.go.dev/github.com/RobertWHurst/eurus)
-[![Go Report Card](https://goreportcard.com/badge/github.com/RobertWHurst/eurus)](https://goreportcard.com/report/github.com/RobertWHurst/eurus)
+[![Go Reference](https://pkg.go.dev/badge/github.com/RobertWHurst/eurus/v2.svg)](https://pkg.go.dev/github.com/RobertWHurst/eurus/v2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/RobertWHurst/eurus/v2)](https://goreportcard.com/report/github.com/RobertWHurst/eurus/v2)
 [![GitHub release](https://img.shields.io/github/v/release/RobertWHurst/eurus)](https://github.com/RobertWHurst/eurus/releases)
 [![License](https://img.shields.io/github/license/RobertWHurst/eurus)](LICENSE)
 [![Sponsor](https://img.shields.io/static/v1?label=Sponsor&message=%E2%9D%A4&logo=GitHub&color=%23fe8e86)](https://github.com/sponsors/RobertWHurst)
@@ -66,7 +66,7 @@ Eurus lets you distribute WebSocket connections across multiple backend services
 ## Installation
 
 ```bash
-go get github.com/RobertWHurst/eurus
+go get github.com/RobertWHurst/eurus/v2
 ```
 
 For production with NATS:
@@ -93,8 +93,8 @@ import (
     "net/http"
     "github.com/RobertWHurst/velaros"
     "github.com/RobertWHurst/velaros/middleware/json"
-    "github.com/RobertWHurst/eurus"
-    "github.com/RobertWHurst/eurus/transport/localtransport"
+    "github.com/RobertWHurst/eurus/v2"
+    "github.com/RobertWHurst/eurus/v2/transport/localtransport"
 )
 
 func main() {
@@ -133,8 +133,8 @@ import (
     "log"
     "github.com/RobertWHurst/velaros"
     "github.com/RobertWHurst/velaros/middleware/json"
-    "github.com/RobertWHurst/eurus"
-    "github.com/RobertWHurst/eurus/transport/localtransport"
+    "github.com/RobertWHurst/eurus/v2"
+    "github.com/RobertWHurst/eurus/v2/transport/localtransport"
 )
 
 func main() {
@@ -297,8 +297,8 @@ import (
     "github.com/RobertWHurst/velaros"
     "github.com/RobertWHurst/velaros/middleware/json"
     "github.com/nats-io/nats.go"
-    "github.com/RobertWHurst/eurus"
-    "github.com/RobertWHurst/eurus/transport/natstransport"
+    "github.com/RobertWHurst/eurus/v2"
+    "github.com/RobertWHurst/eurus/v2/transport/natstransport"
 )
 
 // Connect to NATS
@@ -357,8 +357,8 @@ Services are just Velaros routers. The key is using `PublicBind()` for routes yo
 import (
     "github.com/RobertWHurst/velaros"
     "github.com/RobertWHurst/velaros/middleware/json"
-    "github.com/RobertWHurst/eurus"
-    "github.com/RobertWHurst/eurus/transport/natstransport"
+    "github.com/RobertWHurst/eurus/v2"
+    "github.com/RobertWHurst/eurus/v2/transport/natstransport"
 )
 
 // Create router with handlers
@@ -425,7 +425,7 @@ Transports handle communication between gateways and services. You have two opti
 Perfect for development and testing - everything runs in a single process:
 
 ```go
-import "github.com/RobertWHurst/eurus/transport/localtransport"
+import "github.com/RobertWHurst/eurus/v2/transport/localtransport"
 
 transport := localtransport.New()
 // Share this instance between gateway and services
@@ -444,7 +444,7 @@ For production systems where gateways and services run on different machines:
 ```go
 import (
     "github.com/nats-io/nats.go"
-    "github.com/RobertWHurst/eurus/transport/natstransport"
+    "github.com/RobertWHurst/eurus/v2/transport/natstransport"
 )
 
 nc, _ := nats.Connect("nats://nats-server:4222")

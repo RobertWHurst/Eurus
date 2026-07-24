@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	"github.com/telemetryos/go-debug/debug"

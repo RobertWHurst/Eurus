@@ -3,7 +3,7 @@ package natstransport
 import (
 	"context"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/vmihailenco/msgpack/v5"
 )

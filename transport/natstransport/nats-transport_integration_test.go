@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RobertWHurst/eurus"
+	"github.com/RobertWHurst/eurus/v2"
 	"github.com/RobertWHurst/velaros"
 	"github.com/coder/websocket"
 	natsserver "github.com/nats-io/nats-server/v2/server"
