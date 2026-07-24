@@ -405,3 +405,62 @@ func BenchmarkNatsTransport_MessageGateway_Inline(b *testing.B) {
 	cancel()
 	<-done
 }
+
+func TestNatsTransport_MessageService_OversizedPayloadStreams(t *testing.T) {
+	conn := startNats(t)
+	transport := New(conn)
+
+	bigPayload := bytes.Repeat([]byte("y"), int(conn.MaxPayload())+64*1024)
+
+	received := make(chan *velaros.SocketMessage, 1)
+	stop := serveSub(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceMessages(ctx, "svc-1", func(gatewayID, socketID string, connInfo *velaros.ConnectionInfo, msg *velaros.SocketMessage) {
+			received <- msg
+		})
+	})
+	defer stop()
+
+	err := transport.MessageService("svc-1", "gw-1", "socket-1", &velaros.ConnectionInfo{}, &velaros.SocketMessage{
+		Type: websocket.MessageBinary,
+		Data: bigPayload,
+	})
+	require.NoError(t, err)
+
+	select {
+	case msg := <-received:
+		require.Equal(t, len(bigPayload), len(msg.Data))
+		assert.True(t, bytes.Equal(bigPayload, msg.Data), "streamed payload should arrive intact")
+	case <-time.After(10 * time.Second):
+		t.Fatal("streamed message not delivered")
+	}
+}
+
+func TestNatsTransport_ServiceAnnouncement_CarriesRouteDescriptors(t *testing.T) {
+	transport := New(startNats(t))
+
+	received := make(chan *eurus.ServiceDescriptor, 1)
+	stop := serveSub(t, func(ctx context.Context) (eurus.Subscription, error) {
+		return transport.SubscribeServiceAnnouncements(ctx, func(descriptor *eurus.ServiceDescriptor) {
+			received <- descriptor
+		})
+	})
+	defer stop()
+
+	route, err := eurus.NewRouteDescriptor("/api/items/:id")
+	require.NoError(t, err)
+	require.NoError(t, transport.AnnounceService(&eurus.ServiceDescriptor{
+		Name:             "svc-1",
+		ID:               "svc-1-id",
+		RouteDescriptors: []*eurus.RouteDescriptor{route},
+	}))
+
+	select {
+	case descriptor := <-received:
+		require.Len(t, descriptor.RouteDescriptors, 1)
+		require.NotNil(t, descriptor.RouteDescriptors[0].Pattern)
+		_, matched := descriptor.RouteDescriptors[0].Pattern.Match("/api/items/42")
+		assert.True(t, matched, "route pattern must survive the msgpack round trip")
+	case <-time.After(5 * time.Second):
+		t.Fatal("announcement not delivered")
+	}
+}
