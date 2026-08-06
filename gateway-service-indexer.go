@@ -184,24 +184,36 @@ func (r *GatewayServiceIndexer) PruneStaleServices(threshold time.Duration) ([]s
 	return staleIDs, affectedSocketIDs
 }
 
-func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {
+// Resolve finds the service and route that match the given path. It returns
+// the matching service descriptor and route descriptor, or false when no
+// service can handle the path.
+func (r *GatewayServiceIndexer) Resolve(path string) (*ServiceDescriptor, *RouteDescriptor, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	if r.closed {
-		return "", false
+		return nil, nil, false
 	}
 
-	for serviceName, instances := range r.servicesByName {
+	for _, instances := range r.servicesByName {
 		for _, instance := range instances {
 			for _, route := range instance.RouteDescriptors {
 				if _, isMatch := route.Pattern.Match(path); isMatch {
-					return serviceName, true
+					return instance, route, true
 				}
 			}
 		}
 	}
-	return "", false
+	return nil, nil, false
+}
+
+// ResolveService finds the name of the service that matches the given path.
+func (r *GatewayServiceIndexer) ResolveService(path string) (string, bool) {
+	serviceDescriptor, _, ok := r.Resolve(path)
+	if !ok {
+		return "", false
+	}
+	return serviceDescriptor.Name, true
 }
 
 func (r *GatewayServiceIndexer) MapSocket(serviceName, socketID string) (string, bool, error) {

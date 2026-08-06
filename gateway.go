@@ -31,6 +31,18 @@ var GatewayAnnounceInterval = time.Duration(8+rand.IntN(2)) * time.Second
 // message to a client socket before the socket is considered failed.
 var GatewaySendTimeout = 30 * time.Second
 
+// ContextKeyRouteDescriptor is the key used to store the matched route
+// descriptor on the velaros context.
+const ContextKeyRouteDescriptor = "eurus:route-descriptor"
+
+// ContextKeyServiceDescriptor is the key used to store the matched service
+// descriptor on the velaros context.
+const ContextKeyServiceDescriptor = "eurus:service-descriptor"
+
+// ContextKeyServiceDescriptors is the key used to store all service
+// descriptors on the velaros context.
+const ContextKeyServiceDescriptors = "eurus:service-descriptors"
+
 type Gateway struct {
 	Name      string
 	ID        string
@@ -264,13 +276,18 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 	}
 
 	gatewayRouteDebug.Tracef("Resolving service for path %s", path)
-	serviceName, ok := gsi.ResolveService(path)
+	serviceDescriptor, routeDescriptor, ok := gsi.Resolve(path)
 	if !ok {
 		gatewayRouteDebug.Tracef("No service found for %s, skipping to next handler", path)
 		ctx.Next()
 		return
 	}
+	serviceName := serviceDescriptor.Name
 	gatewayRouteDebug.Tracef("Resolved %s to service %s", path, serviceName)
+
+	if routeDescriptor != nil {
+		ctx.Set(ContextKeyRouteDescriptor, routeDescriptor)
+	}
 
 	socket := velaros.CtxSocket(ctx)
 	g.socketsMu.Lock()
@@ -319,6 +336,63 @@ func (g *Gateway) Handle(ctx *velaros.Context) {
 			break
 		}
 	}
+}
+
+// DescriptorMiddleware returns a velaros middleware that resolves the
+// matching route descriptor for the incoming message and sets it on the
+// context. Downstream middleware can retrieve it with
+// RouteDescriptorFromContext — for example to enforce auth or rate-limit
+// policy declared with velaros.WithMetadata before the message is dispatched.
+func (g *Gateway) DescriptorMiddleware() velaros.HandlerFunc {
+	return func(ctx *velaros.Context) {
+		if gsi := g.gsi.Load(); gsi != nil {
+			ctx.Set(ContextKeyServiceDescriptors, gsi.ServiceDescriptors())
+
+			if serviceDescriptor, routeDescriptor, ok := gsi.Resolve(ctx.Path()); ok {
+				ctx.Set(ContextKeyServiceDescriptor, serviceDescriptor)
+				if routeDescriptor != nil {
+					ctx.Set(ContextKeyRouteDescriptor, routeDescriptor)
+				}
+			}
+		}
+		ctx.Next()
+	}
+}
+
+// RouteDescriptorFromContext retrieves the route descriptor that was set on
+// the context by DescriptorMiddleware or Handle. Returns nil if no descriptor
+// was set.
+func RouteDescriptorFromContext(ctx *velaros.Context) *RouteDescriptor {
+	v, ok := ctx.Get(ContextKeyRouteDescriptor)
+	if !ok {
+		return nil
+	}
+	routeDescriptor, _ := v.(*RouteDescriptor)
+	return routeDescriptor
+}
+
+// ServiceDescriptorFromContext retrieves the service descriptor that was set
+// on the context by DescriptorMiddleware. Returns nil if no descriptor was
+// set.
+func ServiceDescriptorFromContext(ctx *velaros.Context) *ServiceDescriptor {
+	v, ok := ctx.Get(ContextKeyServiceDescriptor)
+	if !ok {
+		return nil
+	}
+	serviceDescriptor, _ := v.(*ServiceDescriptor)
+	return serviceDescriptor
+}
+
+// ServiceDescriptorsFromContext retrieves the service descriptors that were
+// set on the context by DescriptorMiddleware. Returns nil if no descriptors
+// were set.
+func ServiceDescriptorsFromContext(ctx *velaros.Context) []*ServiceDescriptor {
+	v, ok := ctx.Get(ContextKeyServiceDescriptors)
+	if !ok {
+		return nil
+	}
+	serviceDescriptors, _ := v.([]*ServiceDescriptor)
+	return serviceDescriptors
 }
 
 func (g *Gateway) HandleClose(ctx *velaros.Context) {
