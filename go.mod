@@ -3,7 +3,7 @@ module github.com/RobertWHurst/eurus/v2
 go 1.25.0
 
 require (
-	github.com/RobertWHurst/velaros v1.27.0
+	github.com/RobertWHurst/velaros v1.29.0
 	github.com/coder/websocket v1.8.14
 	github.com/nats-io/nats-server/v2 v2.14.3
 	github.com/nats-io/nats.go v1.51.0
